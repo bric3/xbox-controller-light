@@ -256,14 +256,33 @@ GIP header or forward a brightness byte to LED task 8.
 Task 29's host-manager dispatcher is at `0x00103544`; its state table is at
 `0x1004ef78`, with a second enrolment state table at `0x1004ef8c`. Recovered
 states handle connection, enrolment and host events, with some LED patterns
-triggered by those events. No brightness branch for vendor command `0x28` was
-identified. The precise intended semantics of that command remain unresolved.
+triggered by those events. In the connected wireless state (`0x00106cf8`),
+command `0x28` reaches `0x0010741e`, which calls the unknown-command logger
+at `0x1004a9ae` through thunk `0x00102160`. ARM emulation confirms this for
+payloads beginning with `00`, `01`, `0a` and `ff`: no task dispatch occurs
+before that logger, and the brightness state remains unchanged. This identifies
+an ignored command in this state; it does not establish its intended purpose
+or behaviour in every firmware version and host state.
 
 The standard Bluetooth HID output callback at `0x100408de` handles rumble and
-queues task 10, message `0x1200`. This also supplies no generic GIP tunnel.
+queues task 10, message `0x1200`. Emulation confirms that lengths 0, 3 and 7
+return an error; lengths 8 and 13 forward only the first eight bytes as rumble,
+even when the bytes start with the GIP LED opcode. The HID Control Point callback
+at `0x1004072c` only tail-calls the `LEHIDCtrl` diagnostic logger. These paths
+supply no generic GIP tunnel or suspend-to-dim command in the analysed image.
 These findings provide no verified Bluetooth brightness command and do not
-prove the absence of every possible command. Nothing was written to the vendor
-characteristic during this investigation.
+prove the absence of every possible command. The later
+[hardware test](BLUETOOTH-MACOS.md#hidden-hid-and-vendor-write-tests-2026-10-15)
+sent four GIP LED packets to the vendor characteristic on installed `5.9.2709.0`.
+All were acknowledged; the user observed no LED change.
+
+The ten additional checks are in [XboxBluetooth.java](tools/ghidra/XboxBluetooth.java).
+They run against the pinned, reconstructed application and stop before external
+calls. One diagnostic logger is skipped to reach the short-write error response.
+Ghidra's legacy ARM emulator cannot execute the ISA-mode update on the final
+branch-and-link; the tests assert the call-site registers and thunk destination
+instead. They do not emulate the Bluetooth radio, the scheduler or hardware.
+Results: [Bluetooth path checks](target/firmware-analysis/bluetooth-path-verification.txt).
 
 ## Repeat the offline analysis
 
@@ -285,6 +304,7 @@ mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java --self-test
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java import
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java map-startup
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java handlers
+mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java bluetooth
 
 # Read-only inspection of selected addresses; code: defines a missing function temporarily.
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java inspect 1004ac04 10074ffc 100756f6

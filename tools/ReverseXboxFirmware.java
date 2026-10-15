@@ -68,8 +68,8 @@ class ReverseXboxFirmware {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length == 0 || !List.of("import", "map-startup", "handlers", "inspect", "--self-test").contains(args[0]))
-            throw new IllegalArgumentException("Usage: ReverseXboxFirmware.java import | map-startup | handlers | inspect [ADDRESS...] | --self-test");
+        if (args.length == 0 || !List.of("import", "map-startup", "handlers", "bluetooth", "inspect", "--self-test").contains(args[0]))
+            throw new IllegalArgumentException("Usage: ReverseXboxFirmware.java import | map-startup | handlers | bluetooth | inspect [ADDRESS...] | --self-test");
 
         byte[] bytes = Files.readAllBytes(IMAGE);
         var data = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
@@ -118,6 +118,9 @@ class ReverseXboxFirmware {
             command.addAll(List.of("-process", "component-3.bin", "-analysisTimeoutPerFile", "300",
                     "-preScript", "XboxFirmware.java", args[0], output.toString(),
                     "-postScript", "XboxFirmware.java", "export", output.toString()));
+        } else if (args[0].equals("bluetooth")) {
+            command.addAll(List.of("-process", "component-3.bin", "-readOnly", "-noanalysis",
+                    "-postScript", "XboxBluetooth.java", output.toString()));
         } else {
             command.addAll(List.of("-process", "component-3.bin", "-readOnly", "-noanalysis",
                     "-postScript", "XboxFirmware.java", "inspect", output.toString()));

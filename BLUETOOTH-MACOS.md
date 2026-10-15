@@ -17,10 +17,213 @@ reports unsupported LED control through a separate handler.
 - The controller's raw 283-byte HID Report Map exactly matches the macOS descriptor and three reference dumps. It declares input report `01` and rumble output report `03`, with no feature reports or LED usages.
 - All 24 tested GIP LED transport variants were rejected by macOS. A zero-strength rumble output report was accepted.
 - Firmware, battery, and both readable vendor values agree byte for byte between CoreBluetooth and captured ATT responses.
-- The vendor writable characteristic has not been tested on hardware. The newer
-  analysed firmware routes it to host management; see the firmware comparison below.
+- Four GIP LED packets sent to the vendor writable characteristic were acknowledged
+  on firmware `5.9.2709.0`. The user observed no brightness change.
+- Private CoreBluetooth service discovery and a direct Report Map read both failed
+  with `The specified UUID is not allowed for this operation.`
 
 These findings establish the limits of the tested interfaces. They do not prove that every possible Bluetooth brightness command is absent.
+
+## Driver and direct GATT investigation: 2026-10-15
+
+Reviewed the remapper at revision `b117ce010cf3d21cab6806b55fd890943cd33783`,
+its 13 issue bodies and relevant replies, all 19 discussion topics, and its
+empty pull request history. Its [LED discussion](https://github.com/Adam777Z/xbox-controller-button-remapper/discussions/16)
+leads to SDL and xbledctl; it supplies no working Bluetooth command.
+
+The user's [Steam driver example](https://steamcommunity.com/discussions/forum/1/3819656548992688579/?ctp=10#c836125171214496655)
+confirms a Windows user needed the Xbox Extended Feature Support Driver.
+The instructions quoted in that same comment explicitly limit the method to
+USB and the Xbox Wireless Adapter and exclude Bluetooth. SDL revision
+`6defbc0129b5ba90bab3f6c67bbc1e9329e24ff1` has a
+[Steam Xbox backend wrapper](https://github.com/libsdl-org/SDL/blob/6defbc0129b5ba90bab3f6c67bbc1e9329e24ff1/src/hidapi/SDL_hidapi_steamxbox.h)
+and [conditional backend wiring](https://github.com/libsdl-org/SDL/blob/6defbc0129b5ba90bab3f6c67bbc1e9329e24ff1/src/hidapi/SDL_hidapi.c).
+Its referenced `steamxbox/hid.c` implementation is absent from that public tree.
+
+Valve's [Windows client manifest](https://client-update.akamai.steamstatic.com/steam_client_win32)
+supplied `bins_win32.zip.23e34a6d4b10596a44561a5100dac5585d2517da`.
+Its SHA-256 matched the manifest:
+`8b712b2a3412a9066b7725f4e1c5cef9a7ca5b187b6585a5b92d25d09df0ba62`.
+The embedded `bin/drivers.exe` archive contains x64 `steamxbox.sys` version
+`1.0.0.16`, SHA-256
+`24a7924f33dcb3b122efcaf1b425d06f05b99f9456ca1ab3b850901939be5e16`.
+It was extracted and analysed with Ghidra; no Windows binary was executed.
+
+The driver does contain Bluetooth handlers. Device creation identifies
+`BTHLEDEVICE` and assigns connection transport 4. Packet submission at
+`0x140003400` branches on that transport: the BLE branch at `0x140003546`
+forwards the supplied buffer and length through `WdfIoTargetSendIoctlSynchronously`,
+IOCTL `0x000b000f` ([HID write report](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/hidport/ni-hidport-ioctl_hid_write_report)).
+The classic Bluetooth branch prepends `a2` and submits an interrupt transfer.
+Neither traced branch converts a GIP LED command into a vendor GATT command.
+This identifies the driver's lower-level transport path, without demonstrating
+a Bluetooth brightness command. The driver was not exercised on Windows.
+
+Additional [firmware execution checks](FIRMWARE.md#bluetooth-vendor-service)
+show that the vendor command is ignored in the connected Bluetooth state of
+`5.23.6.0`. The HID output callback rejects a seven-byte GIP packet and treats
+an eight-byte or longer write as rumble. The HID Control Point only logs its
+event. Bypassing macOS's report filtering would still reach these firmware
+handlers in that version. Installed `5.9.2709.0` remains a separate test target.
+
+Local Objective-C inspection and CoreBluetooth disassembly found private
+`CBService.initWithPeripheral:dictionary:` and `CBPeripheral.setAttribute:forHandle:`
+methods. The read-only GATT probe now has a `hidden-hid` mode which constructs
+the captured HID service range `0016`-`0023` and requests its characteristics
+directly. When discovery is rejected, it constructs `CBCharacteristic` for
+Report Map `2A4B`, declaration handle `001b`, value handle `001c`, and reads it
+directly. It requires matching PnP bytes and firmware `5.9.2709.0` before using
+those handles. A local self-check verifies both constructors, UUIDs, properties
+and handles. Both access paths were rejected on the connected controller.
+
+```sh
+JBANG_DIR="$PWD/target/jbang" mise exec java@corretto-25 -- jbang tools/XboxGattProbe.java --self-test
+JBANG_DIR="$PWD/target/jbang" mise exec java@corretto-25 -- jbang tools/XboxGattProbe.java hidden-hid 600
+```
+
+The optional wait is 1-600 seconds, default 15. During the wait, the probe scans
+and checks already-connected peripherals every five seconds, including devices
+macOS reconnects before an advertisement reaches the probe. It cannot wake a
+powered-off controller. This mode sends no characteristic writes, including
+vendor writes, and does not subscribe to notifications.
+
+The initial sandboxed run returned CoreBluetooth authorization 2 and state 2.
+Outside the sandbox, authorization was 3 and state 5, but no Xbox peripheral
+was connected or discovered during waits of 600, 120 and 60 seconds. SIP was
+enabled and the account had standard privileges. The private constructor
+self-check and firmware checks passed. The user subsequently powered on the
+controller, allowing the live tests below.
+
+Evidence: [remapper discussions and PR inventory](target/led-project-research/remapper-research.json),
+[Steam thread](target/led-project-research/steam-led-page10.html),
+[Valve package manifest](target/led-project-research/steam_client_win32.manifest),
+[Steam driver decompilation](target/led-project-research/steamxbox-decompiled.c),
+[driver strings and references](target/led-project-research/steamxbox-data.txt),
+[driver Ghidra analysis log](target/led-project-research/steamxbox-analysis.log),
+[native method inventory](target/led-project-research/bluetooth-runtime.txt),
+[CoreBluetooth disassembly](target/led-project-research/corebluetooth-disassembly.txt),
+[live hidden HID attempt](target/led-project-research/hidden-hid-live.txt),
+[final reconnection check](target/led-project-research/hidden-hid-final.txt).
+
+## Hidden HID and vendor write tests: 2026-10-15
+
+The controller reconnected as `045e:0b13`, firmware `5.9.2709.0`. Constructing
+the hidden service succeeded locally, but characteristic discovery returned
+`The specified UUID is not allowed for this operation.` A second attempt
+constructed the captured Report Map characteristic and requested its value
+directly. That read returned the same error and zero bytes. Private constructors
+alone do not provide access to this HID service through CoreBluetooth.
+
+The separate [vendor probe](target/XboxVendorLed.java) verified PnP identity,
+firmware and the writable characteristic before sending four seven-byte GIP
+LED packets to `00000004-5F60-4C4F-9C83-A7953298D40D`, with response, three
+seconds apart:
+
+```text
+0a 20 01 03 00 01 00
+0a 20 02 03 00 01 14
+0a 20 03 03 00 01 00
+0a 20 04 03 00 01 14
+```
+
+These request steady brightness steps 0, 20, 0 and 20. All four writes
+completed without an ATT error. The user watched the entire sequence and
+reported no visible change. This rules out these GIP packets as a working
+LED command on that characteristic in the tested state; an acknowledgement
+does not establish that the controller interpreted the payload as LED control.
+
+IOBluetooth disassembly also found that `BluetoothHCISendRawACLData`,
+`BluetoothHCISendRawCommand` and `sendRawHCIRequest` are each just
+`mov w0, #0; ret` in this macOS build. They report success without sending
+anything. These legacy exports therefore cannot supply the raw transport;
+they were not called. No sudo or SIP changes were used for these tests.
+
+Verification: service and characteristic constructor self-checks passed;
+the vendor packet self-check passed; the live vendor probe received 4/4
+successful write callbacks. Hidden HID reads failed as described above.
+No Bluetooth brightness control or LED readback was achieved.
+
+Evidence: [hidden service attempt](target/led-project-research/hidden-hid-awake.txt),
+[direct Report Map attempt](target/led-project-research/hidden-hid-direct-read.txt),
+[vendor write results](target/led-project-research/vendor-led-live.txt),
+[IOBluetooth disassembly](target/led-project-research/iobluetooth-disassembly.txt).
+
+## Built-in radio and driver replacement: 2026-10-15
+
+The required transport is the Mac's built-in radio, with SIP enabled. No
+working access workaround has been established under those constraints.
+
+The live IORegistry identifies `BTLEServer`, PID 739, as the creator of the
+Xbox `IOHIDUserDevice`. Its child `IOHIDInterface` is matched by
+`IOHIDEventDummyService`, published by `AppleGameControllerPersonality`.
+The built-in radio uses `AppleBluetoothModule` and
+`AppleConvergedIPCOLYBTControl`; the Xbox HID interface is above that transport.
+
+```text
+HID app or prospective HIDDriverKit driver
+  -> IOHIDUserDevice
+  -> BTLEServer: report ID/type -> discovered GATT characteristic
+  -> Apple's Bluetooth stack -> built-in radio -> Xbox controller
+```
+
+Apple's published [IOHIDInterface implementation](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDFamily/IOHIDInterface.cpp)
+forwards DriverKit `SetReport` to its owning HID device.
+[IOHIDUserDevice](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDFamily/IOHIDUserDevice.cpp)
+then forwards to its user-space provider. Local arm64e disassembly confirms
+that `BTLEServer`'s `HIDService.writeReportData:reportID:reportType:withResponse:error:`
+at `0x10001fb04` looks up the corresponding discovered characteristic. A missing
+lookup returns `0xe00002f0`, the same error seen in the live LED report tests.
+Replacing the HID event handler therefore leaves this report mapping in place.
+It does not expose arbitrary ATT handles or replace the Bluetooth transport.
+
+The direct CoreBluetooth read at `0x199b9ded4` sends characteristic declaration
+and value handles in message `0xcb`, without a caller-supplied UUID. Changing
+the synthetic characteristic's UUID would not change that request.
+`CBManager.sendRawCommand:data:completionHandler:` at `0x199bd35c0` is another
+`mov w0, #0; ret` stub in this build.
+
+`BTLEServer` carries `com.apple.BTServer.allowRestrictedServices`, also present
+as a string in `bluetoothd`. An isolated copy of the Java launcher was locally
+signed with that entitlement and the ordinary JIT/library entitlements. Running
+only `java -version` terminated with status 137, including outside the tool
+sandbox. An otherwise identical locally signed control ran successfully.
+Removing the Bluetooth entitlement from the original test path also restored
+successful execution. `codesign --verify --strict` accepted the restricted
+binary on disk, and SIP remained enabled. This establishes a launch failure
+associated with claiming the entitlement locally; it does not test an
+Apple-authorized provisioning profile. The system log store was inaccessible
+to this standard account, so the exact validation diagnostic was not obtained.
+
+A custom HIDDriverKit extension can use SIP-compatible installation when it
+has [Apple-granted entitlements and matching signing/provisioning](https://developer.apple.com/documentation/driverkit/requesting-entitlements-for-driverkit-development).
+That approval does not grant `BTLEServer`'s private restricted-service access.
+No public DriverKit interface for replacing this built-in Bluetooth transport
+was found. Apple's [driver guidance](https://developer.apple.com/documentation/driverkit/creating-a-driver-using-the-driverkit-sdk)
+excludes Bluetooth radio functionality from USBDriverKit, and its
+[kernel-extension guidance](https://developer.apple.com/support/kernel-extensions/)
+deprecates the older Bluetooth HID interfaces. A signed kernel extension can
+coexist with SIP, but Apple Silicon requires Recovery approval of Reduced
+Security and third-party kernel extensions, plus restart. That is a separate
+security policy from SIP and cannot be supplied by Privileges alone.
+See [Apple's deployment requirements](https://support.apple.com/guide/deployment/depa5fb8376f/web).
+No kernel transport implementation or compatible signing profile was verified.
+
+If a useful DriverKit implementation becomes viable, clean installation and
+removal should use an app containing the extension and Apple's
+[activation/deactivation requests](https://developer.apple.com/documentation/systemextensions/installing-system-extensions-and-drivers).
+Match only the intended Xbox interface. Uninstall must wait for completion,
+report any [required restart](https://developer.apple.com/documentation/systemextensions/ossystemextensionrequest/result/willcompleteafterreboot),
+and verify that Apple's handler resumes after reconnecting the controller.
+This lifecycle is a design requirement, not a tested installer. No driver was
+installed, no system service was stopped, and the installed JDK was unchanged.
+The temporary executable copies were removed after the launch experiment.
+
+Evidence: [HID producer and owner](target/led-project-research/hid-producer-tree.txt),
+[service tree](target/led-project-research/ioservice-tree.txt),
+[radio driver](target/led-project-research/builtin-radio-driver.txt),
+[BTLEServer entitlements](target/led-project-research/btleserver-entitlements.txt),
+[BTLEServer arm64e disassembly](target/led-project-research/btleserver-arm64e.txt),
+[entitlement experiment](target/led-project-research/restricted-entitlement-test.txt).
 
 ## Live Bluetooth retry: 2026-10-15
 
@@ -56,7 +259,8 @@ provides a GIP tunnel or a verified brightness command.
 
 These findings concern downloaded `5.23.6.0`. The installed `5.9.2709.0`
 image remains unavailable, so the exact vendor-command semantics on this
-controller are unresolved. No vendor characteristic writes were attempted.
+controller are unresolved. The four live vendor writes above produced no
+visible LED change on the installed version.
 
 ## Environment
 

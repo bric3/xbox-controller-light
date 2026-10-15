@@ -17,6 +17,8 @@ class XboxGattProbe {
     static MemorySegment delegate, central, peripheral = MemorySegment.NULL;
     static boolean done, started, failed;
     static boolean hidOnly;
+    static boolean hiddenHid, matchingModel, matchingFirmware, hiddenStarted, hiddenMapRead;
+    static int waitSeconds = 15;
     static int pending;
     static final Set<Long> discoveredServices = new HashSet<>();
     static Object nativeCall(String name, FunctionDescriptor descriptor, Object... args) throws Throwable {
@@ -85,6 +87,13 @@ class XboxGattProbe {
         message(peripheral, "setDelegate:", delegate);
         message(central, "connectPeripheral:options:", peripheral, MemorySegment.NULL);
     }
+    static void findConnected(MemorySegment manager) throws Throwable {
+        MemorySegment services = message(type("NSMutableArray"), "array");
+        for (String id : List.of("1800", "1801", "180A", "180F", "1812"))
+            message(services, "addObject:", message(type("CBUUID"), "UUIDWithString:", stringObject(id)));
+        for (MemorySegment candidate : elements(message(manager, "retrieveConnectedPeripheralsWithServices:", services)))
+            selectPeripheral(candidate);
+    }
     static void state(MemorySegment self, MemorySegment cmd, MemorySegment manager) {
         try {
             long state = number(manager, "state");
@@ -92,14 +101,9 @@ class XboxGattProbe {
             if (state == 3 || state == 2 || state == 4) { failed = done = true; return; }
             if (state != 5 || started) return;
             started = true;
-            MemorySegment services = message(type("NSMutableArray"), "array");
-            for (String id : List.of("1800", "1801", "180A", "180F", "1812"))
-                message(services, "addObject:", message(type("CBUUID"), "UUIDWithString:", stringObject(id)));
-            MemorySegment connected = message(manager, "retrieveConnectedPeripheralsWithServices:", services);
-            System.out.println("Connected peripherals with standard HID/device/battery services: " + number(connected, "count"));
-            for (MemorySegment candidate : elements(connected)) selectPeripheral(candidate);
+            findConnected(manager);
             if (peripheral.address() == 0) {
-                System.out.println("No connected Xbox peripheral returned; scanning advertisements for 15 seconds");
+                System.out.println("No connected Xbox peripheral returned; waiting up to " + waitSeconds + " seconds");
                 message(manager, "scanForPeripheralsWithServices:options:", MemorySegment.NULL, MemorySegment.NULL);
             }
         } catch (Throwable error) { reportFailure(error); }
@@ -151,6 +155,15 @@ class XboxGattProbe {
     }
     static void characteristics(MemorySegment self, MemorySegment cmd, MemorySegment device, MemorySegment service, MemorySegment err) {
         try {
+            if (hiddenHid && uuid(service).equals("1812") && err.address() != 0) {
+                System.out.println("Hidden service discovery rejected: " + error(err) + "; trying captured Report Map handle directly");
+                MemorySegment map = hiddenReportMap(service);
+                message(device, "setAttribute:forHandle:", map, message(map, "handle"));
+                // Replace the pending discovery with one direct read.
+                message(device, "readValueForCharacteristic:", map);
+                message(map, "release");
+                return;
+            }
             if (err.address() != 0) { System.out.println("Characteristic discovery error: " + error(err)); failed = true; }
             for (MemorySegment characteristic : elements(message(service, "characteristics"))) {
                 long props = number(characteristic, "properties");
@@ -184,6 +197,18 @@ class XboxGattProbe {
             String hex = length == 0 ? "empty" : HexFormat.ofDelimiter(" ").formatHex(message(data, "bytes").reinterpret(length).toArray(JAVA_BYTE));
             System.out.println("Value: uuid=" + uuid(characteristic) + " bytes=" + length + " error=" + error(err) + " data=" + hex);
             if (err.address() != 0) failed = true;
+            if (hiddenHid && err.address() == 0) {
+                if (uuid(characteristic).equals("2A4B") && length > 0) hiddenMapRead = true;
+                if (uuid(characteristic).equals("2A50")) matchingModel = hex.equals("02 5e 04 13 0b 09 05");
+                if (uuid(characteristic).equals("2A26")) matchingFirmware = hex.equals("35 2e 39 2e 32 37 30 39 2e 30");
+                if (matchingModel && matchingFirmware && !hiddenStarted) {
+                    hiddenStarted = true;
+                    MemorySegment hidden = hiddenService(device);
+                    message(device, "setAttribute:forHandle:", hidden, message(hidden, "startHandle"));
+                    inspectService(device, hidden);
+                    message(hidden, "release");
+                }
+            }
             if (--pending == 0) done = true;
         } catch (Throwable error) { reportFailure(error); }
     }
@@ -194,13 +219,60 @@ class XboxGattProbe {
             if (--pending == 0) done = true;
         } catch (Throwable error) { reportFailure(error); }
     }
+    static MemorySegment hiddenService(MemorySegment device) throws Throwable {
+        // Private constructors and handles verified against macOS and the 5.9.2709.0 ATT capture.
+        MemorySegment values = message(type("NSMutableDictionary"), "dictionary");
+        MemorySegment id = message(type("CBUUID"), "UUIDWithString:", stringObject("1812"));
+        message(values, "setObject:forKey:", message(id, "data"), stringObject("kCBMsgArgUUID"));
+        String[] keys = {"kCBMsgArgType", "kCBMsgArgServiceStartHandle", "kCBMsgArgServiceEndHandle"};
+        int[] numbers = {1, 0x16, 0x23};
+        for (int i = 0; i < keys.length; i++) {
+            MemorySegment value = (MemorySegment) nativeCall("objc_msgSend", FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_INT),
+                    type("NSNumber"), selector("numberWithInt:"), numbers[i]);
+            message(values, "setObject:forKey:", value, stringObject(keys[i]));
+        }
+        return message(message(type("CBService"), "alloc"), "initWithPeripheral:dictionary:", device, values);
+    }
+    static MemorySegment hiddenReportMap(MemorySegment service) throws Throwable {
+        MemorySegment values = message(type("NSMutableDictionary"), "dictionary");
+        MemorySegment id = message(type("CBUUID"), "UUIDWithString:", stringObject("2A4B"));
+        message(values, "setObject:forKey:", message(id, "data"), stringObject("kCBMsgArgUUID"));
+        String[] keys = {"kCBMsgArgCharacteristicProperties", "kCBMsgArgCharacteristicHandle", "kCBMsgArgCharacteristicValueHandle"};
+        int[] numbers = {2, 0x1b, 0x1c};
+        for (int i = 0; i < keys.length; i++) {
+            MemorySegment value = (MemorySegment) nativeCall("objc_msgSend", FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_INT),
+                    type("NSNumber"), selector("numberWithInt:"), numbers[i]);
+            message(values, "setObject:forKey:", value, stringObject(keys[i]));
+        }
+        return message(message(type("CBCharacteristic"), "alloc"), "initWithService:dictionary:", service, values);
+    }
     public static void main(String[] args) throws Throwable {
-        if (args.length > 1 || (args.length == 1 && !args[0].equals("hid")))
-            throw new IllegalArgumentException("Usage: jbang tools/XboxGattProbe.java [hid]");
+        if (args.length > 2 || (args.length > 0 && !List.of("hid", "hidden-hid", "--self-test").contains(args[0]))
+                || (args.length == 2 && args[0].equals("--self-test")))
+            throw new IllegalArgumentException("Usage: jbang tools/XboxGattProbe.java [hid|hidden-hid [1..600 seconds]] | --self-test");
         hidOnly = args.length > 0 && args[0].equals("hid");
+        hiddenHid = args.length > 0 && args[0].equals("hidden-hid");
+        waitSeconds = args.length == 2 ? Integer.parseInt(args[1]) : 15;
+        if (waitSeconds < 1 || waitSeconds > 600) throw new IllegalArgumentException("Wait must be 1..600 seconds");
         SymbolLookup.libraryLookup("/System/Library/Frameworks/CoreBluetooth.framework/CoreBluetooth", arena);
         SymbolLookup core = SymbolLookup.libraryLookup("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", arena);
         MemorySegment pool = message(type("NSAutoreleasePool"), "new");
+        if (args.length == 1 && args[0].equals("--self-test")) {
+            MemorySegment service = hiddenService(MemorySegment.NULL);
+            if (!uuid(service).equals("1812") || number(message(service, "startHandle"), "intValue") != 0x16
+                    || number(message(service, "endHandle"), "intValue") != 0x23)
+                throw new AssertionError("Hidden HID service constructor failed");
+            MemorySegment map = hiddenReportMap(service);
+            if (!uuid(map).equals("2A4B") || number(map, "properties") != 2
+                    || number(message(map, "handle"), "intValue") != 0x1b
+                    || number(message(map, "valueHandle"), "intValue") != 0x1c)
+                throw new AssertionError("Hidden Report Map constructor failed");
+            message(map, "release");
+            message(service, "release");
+            message(pool, "drain");
+            System.out.println("Private service and characteristic constructors verified; no controller accessed.");
+            return;
+        }
         MemorySegment clazz = (MemorySegment) nativeCall("objc_allocateClassPair", FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_LONG),
                 type("NSObject"), arena.allocateFrom("XboxGattReadOnlyDelegate"), 0L);
         register(clazz, "centralManagerDidUpdateState:", "state", 3);
@@ -220,10 +292,22 @@ class XboxGattProbe {
         central = message(message(type("CBCentralManager"), "alloc"), "initWithDelegate:queue:", delegate, MemorySegment.NULL);
         MethodHandle runLoop = linker.downcallHandle(core.find("CFRunLoopRunInMode").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_DOUBLE, JAVA_BYTE));
         MemorySegment mode = core.find("kCFRunLoopDefaultMode").orElseThrow().reinterpret(ADDRESS.byteSize()).get(ADDRESS, 0);
-        long deadline = System.nanoTime() + 15_000_000_000L;
-        while (!done && System.nanoTime() < deadline) runLoop.invokeWithArguments(mode, 0.25, (byte) 0);
+        long deadline = System.nanoTime() + waitSeconds * 1_000_000_000L;
+        long nextLookup = System.nanoTime() + 5_000_000_000L;
+        while (!done && System.nanoTime() < deadline) {
+            runLoop.invokeWithArguments(mode, 0.25, (byte) 0);
+            if (started && peripheral.address() == 0 && System.nanoTime() >= nextLookup) {
+                findConnected(central);
+                nextLookup = System.nanoTime() + 5_000_000_000L;
+            }
+        }
         if (!done) {
             System.out.println("Probe timed out; pending operations=" + pending + ", selected Xbox=" + (peripheral.address() != 0));
+            failed = true;
+        }
+        if (hiddenHid && !hiddenMapRead) {
+            System.out.println(hiddenStarted ? "Hidden HID Report Map was not read."
+                    : "Hidden HID probe requires the captured 045e:0b13 firmware 5.9.2709.0 device.");
             failed = true;
         }
         message(central, "stopScan");

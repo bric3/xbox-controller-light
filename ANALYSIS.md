@@ -24,8 +24,16 @@ firmware comparison, tools, source links and remaining unknowns.
 
 No brightness or glow command worked. macOS rejected all 24 original
 HID candidates and four later LED packet attempts, while accepting the
-zero-strength rumble control. No Bluetooth LED readback is available.
+zero-strength rumble control. Private CoreBluetooth discovery and a direct
+HID Report Map read were also rejected. Four vendor GATT writes were
+acknowledged, with no visible LED change confirmed by the user.
+No Bluetooth LED readback is available.
 These results do not establish that every possible interface is absent.
+
+The built-in radio investigation traced HID report mapping to `BTLEServer`.
+Replacing the upper HID driver would preserve that mapping. Locally claiming
+its restricted-service entitlement prevented the test executable from launching.
+No driver or system configuration was installed or changed.
 
 ## USB
 
