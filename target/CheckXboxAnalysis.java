@@ -11,7 +11,7 @@ import java.util.regex.*;
 
 class CheckXboxAnalysis {
     public static void main(String[] args) throws Exception {
-        Path path = Path.of("ANALYSIS.md");
+        Path path = Path.of("BLUETOOTH-MACOS.md");
         List<String> lines = Files.readAllLines(path);
         List<String> formatted = new ArrayList<>();
         int tables = 0;
@@ -50,6 +50,7 @@ class CheckXboxAnalysis {
         while (links.find()) {
             String target = links.group(1);
             if (target.startsWith("https://") || target.startsWith("#")) continue;
+            target = target.split("#", 2)[0];
             if (!Files.isRegularFile(Path.of(target))) throw new IllegalStateException("Missing evidence: " + target);
             files++;
         }
