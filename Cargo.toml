@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "xbox-light"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Inspect Xbox Wireless Controllers over Bluetooth on macOS"
+
+[dependencies]
+hidapi = { version = "2.6.7", default-features = false, features = ["macos-shared-device"] }
