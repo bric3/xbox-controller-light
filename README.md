@@ -1,142 +1,131 @@
 # xbox-light
 
-Tools to inspect an Xbox Wireless Controller on macOS and control its
-central Xbox button LED over USB. The Java utility provides USB LED control;
-the Rust CLI provides Bluetooth identity, battery and report inspection.
+macOS tools for Xbox Wireless Controller inspection and USB home-button LED control.
 
-Current status: USB LED control works. Bluetooth LED control does not work.
-The LED setting does not survive unplugging USB, confirmed by the user.
-Firmware and LED readback are unavailable through the implemented interfaces.
+| Capability                  | USB `045e:0b12`             | Bluetooth LE `045e:0b13`       |
+| --------------------------- | --------------------------- | ------------------------------ |
+| LED off, brightness, glow   | Verified on hardware        | No working command found       |
+| Identity                    | Java transport inspection   | Rust CLI and Java GATT probe   |
+| Battery                     | No implemented reading      | Coarse HID level; GATT percent |
+| Firmware version            | No implemented reading      | GATT and IORegistry            |
+| Live LED state readback     | Unavailable                 | Unavailable                    |
+| Brightness after disconnect | Setting lost                | No verified setting            |
 
-## Analysis
+Hardware results: Xbox Series X|S, firmware `5.9.2709.0`, macOS `26.7.1`.
+Only Bluetooth product ID `0b13` was tested on hardware.
 
-[ANALYSIS.md](ANALYSIS.md) summarises the current results and evidence boundaries.
+> [!IMPORTANT]
+> USB brightness must be reapplied after reconnecting. Relative adjustments use
+> the last value set by this tool; the controller does not provide brightness readback.
 
-- [Firmware reverse engineering](FIRMWARE.md): official firmware download,
-  version matching, Ghidra analysis, GIP LED-to-PWM path and Bluetooth callbacks.
-- [Bluetooth on macOS](BLUETOOTH-MACOS.md): HID/GATT discovery, unsuccessful
-  LED attempts, HCI captures, descriptor comparisons and remaining leads.
-- [USB](USB.md): working LED utility, Apple's 13-byte framing, unplug behaviour
-  and the unsuccessful firmware-readback attempt.
+## USB LED control
 
-The controller reports `5.9.2709.0`. Firmware analysis used downloaded MERL
-`5.23.6.0`; the exact installed image was not found. No firmware was updated.
-
-## USB LED control on macOS
-
-[XboxUsbLed.java](tools/XboxUsbLed.java) controls the connected USB `045e:0b12`
-controller through shared HID access, with no administrator authentication or
-driver detachment. It automatically detects USB or Bluetooth and routes them
-separately. Requires Java 25 and JBang. Intensity values are 0-47.
+Requires macOS, Java 25 and JBang. Shared HID access keeps Apple's driver attached
+and requires no administrator authentication.
 
 ```sh
-mise exec java@corretto-25 -- jbang tools/XboxUsbLed.java --help
 mise exec java@corretto-25 -- jbang tools/XboxUsbLed.java --inspect
-mise exec java@corretto-25 -- jbang tools/XboxUsbLed.java --on
 mise exec java@corretto-25 -- jbang tools/XboxUsbLed.java --brightness 10
-mise exec java@corretto-25 -- jbang tools/XboxUsbLed.java --increment
-mise exec java@corretto-25 -- jbang tools/XboxUsbLed.java --decrement 5
 mise exec java@corretto-25 -- jbang tools/XboxUsbLed.java --off
 mise exec java@corretto-25 -- jbang tools/XboxUsbLed.java --glow
 ```
 
-`-h`, `--help`, and no arguments show help without opening a controller. `--on`
-sets step 20; `--off` sets zero. `--brightness N` accepts absolute integer steps
-0-47; a bare number remains supported. Increment and decrement default to one
-step and accept an optional amount from 1 to 47. Invalid values and changes
-outside 0-47 are rejected with exit status 2 and a short error.
+| Argument          | Behaviour                                                |
+| ----------------- | -------------------------------------------------------- |
+| `--inspect`       | Detect USB or Bluetooth without writing                  |
+| `--on`            | Set brightness step 20                                   |
+| `--off`           | Set brightness zero                                      |
+| `--brightness N`  | Set an integer step from 0 to 47; bare `N` also accepted |
+| `--increment [N]` | Increase cached value by 1, or by `N` from 1 to 47       |
+| `--decrement [N]` | Decrease cached value by 1, or by `N` from 1 to 47       |
+| `--glow`          | Breathe between 0 and 20 for 30 seconds, then switch off |
+| `-h`, `--help`    | Show help; no arguments also show help                   |
 
-Relative changes use the last brightness this tool set, cached in
-`~/Library/Caches/xbox-light/usb-led.state`. After a USB reconnect or Mac restart,
-set an absolute value first. The tool cannot read the current brightness or
-detect changes made by other software. `--inspect` detects USB `045e:0b12` or
-Bluetooth `045e:0b13` without sending a command. LED commands on Bluetooth return
-exit status 1 with an explicit unsupported message, without entering the USB
-write path or changing its cache. No Bluetooth LED command has been verified
-for this controller; macOS rejected both the seven-byte GIP packet and working
-13-byte USB framing during the Bluetooth test.
+Out-of-range values and relative results are rejected. After reconnecting USB
+or restarting the Mac, set an absolute value before using relative adjustments.
+Cache: `~/Library/Caches/xbox-light/usb-led.state`. Changes made by other software
+cannot be detected. Bluetooth LED requests return an unsupported error.
 
-`--glow` breathes between steps 0 and 20 for 30 seconds, then switches the light
-off over USB. Steady settings remain until another command or controller
-reinitialisation. The user confirmed brightness was lost after unplugging USB.
-The [USB analysis](USB.md) explains Apple's required 13-byte output buffer.
+See [USB reference](docs/usb.md) for framing, state handling and hardware results.
 
-## Build and install the Rust CLI
+## Bluetooth inspection
 
-Requires macOS, Rust 1.85 or newer, and Apple's Command Line Tools. Install them
-with `xcode-select --install` if they are missing. HIDAPI's macOS implementation
-is compiled into the binary; no separate HIDAPI installation is needed.
+Requires macOS, Rust 1.85+ and Apple's Command Line Tools
+(`xcode-select --install`). HIDAPI is compiled into the binary.
 
 ```sh
 cargo build --release --locked
 ./target/release/xbox-light --help
-
-# Optional: install into Cargo's bin directory.
 cargo install --path . --locked
 ```
 
-## Bluetooth inspection usage
-
-Pair and connect the controller in macOS Bluetooth settings first. The CLI does
-not pair controllers or reconnect them.
+1. Pair and connect the controller in macOS Bluetooth settings.
+2. Run `xbox-light list` to enumerate matching interfaces.
+3. Run `xbox-light info` for identity and a coarse battery reading.
+4. Run `xbox-light diagnose` while pressing buttons or moving sticks.
 
 ```sh
 xbox-light list
 xbox-light info
 xbox-light diagnose > controller-diagnostics.txt
 
-# With multiple matching interfaces, copy a path from list:
+# Select a path from list when multiple interfaces match.
 xbox-light info --device 'DevSrvsID:123456'
 xbox-light diagnose --device 'DevSrvsID:123456' > controller-diagnostics.txt
 ```
 
-`list` enumerates recognized Microsoft Xbox Bluetooth gamepad interfaces without
-opening them. It includes name, vendor/product IDs, transport, path, serial when
-available, HID usage, and the device release number. Paths are connection-specific;
-run `list` again after reconnecting. USB interfaces and unrelated Microsoft HID
-devices are excluded.
+| Command    | Output and limits                                                                  |
+| ---------- | ---------------------------------------------------------------------------------- |
+| `list`     | Name, IDs, transport, path, serial if exposed, HID usage and device release number |
+| `info`     | Identity; up to 3 seconds waiting for battery report `04 flags`                    |
+| `diagnose` | Raw HID descriptor; timestamp, length and hex bytes for 5 seconds of input reports |
 
-`info` prints the identity and listens for up to three seconds for the known
-two-byte Xbox Bluetooth battery report (`04 flags`). The battery level is coarse:
-low, medium, high, or full (levels 0-3). USB power is reported without inferring a
-charging state or battery level. If no recognized report arrives, battery is
-marked unavailable. A missing battery report does not mean the battery is empty.
+The CLI sends no output reports or configuration writes. It does not pair or
+reconnect controllers. Device paths change across connections; multiple matching
+interfaces require `--device PATH`, including interfaces on one physical controller.
 
-`diagnose` prints the raw HID report descriptor, then captures input reports for
-five seconds. Each report includes its elapsed timestamp, length, and hex bytes.
-Move sticks or press buttons while it runs. Unrecognized reports are preserved
-without interpretation. The output includes the controller identity and any
-exposed serial number; inspect it before sharing.
+Battery levels are low, medium, high or full (0-3). USB power is reported separately
+without inferring charging or battery level. A missing battery report means
+unavailable. The device release number is separate from the full firmware version;
+firmware and LED fields remain unavailable in the Rust CLI.
 
-`info` and `diagnose` automatically select a single matching interface. Multiple
-matches require `--device PATH`, including multiple interfaces on one physical
-controller. Access uses HIDAPI's shared mode, and no output reports or
-configuration writes are sent. A device access error is reported with the
-underlying HIDAPI error. If macOS denies access, review the privacy permissions
-for the terminal/application running the command; availability must be confirmed
-on actual hardware.
+> [!CAUTION]
+> Diagnostic output can contain serial numbers and opaque device data. Bluetooth
+> captures can also contain encryption keys. Review output before sharing it.
 
-No arguments or `--help` prints help. Invalid arguments exit with code 2; device
-or I/O failures exit with code 1. A successful command exits with code 0, including
-`list` with no controller and `info` with an unavailable battery reading.
+<details>
+<summary>Recognised identities and exit codes</summary>
 
-## Rust CLI identities and limitations
+Microsoft vendor `045e`; Generic Desktop joystick/gamepad usages only.
+USB interfaces, unrelated Microsoft devices and unknown IDs are excluded.
 
-The initial filter recognizes Microsoft (`045e`) Bluetooth/BLE gamepad identities
-from SDL: One S (`02e0`, `02fd`, `0b20`), Series X|S (`0b13`), Elite Series 2
-(`0b05`, `0b22`), and Adaptive (`0b0c`, `0b21`). Only `0b13` has been inspected on
-connected hardware. Unknown IDs are excluded, and only
-Generic Desktop joystick/gamepad usages are selected.
+| Controller     | Bluetooth/BLE product IDs |
+| -------------- | ------------------------- |
+| One S          | `02e0`, `02fd`, `0b20`    |
+| Series X\|S    | `0b13`                    |
+| Elite Series 2 | `0b05`, `0b22`            |
+| Adaptive       | `0b0c`, `0b21`            |
 
-The HID device release number is displayed separately from firmware. It cannot
-represent the full four-component Xbox firmware version. Firmware and LED fields
-remain explicitly unavailable; the tool does not invent values or report a
-remembered setting as a live reading.
+| Exit | Meaning                                                              |
+| ---- | -------------------------------------------------------------------- |
+| `0`  | Success, help, empty list or unavailable battery reading             |
+| `1`  | Device/I/O failure; Java LED requests over Bluetooth are unsupported |
+| `2`  | Invalid arguments                                                    |
 
-The Rust CLI only inspects Bluetooth devices. USB LED control is provided
-by the Java utility described above. Read-only GATT discovery commands
-and capture procedures are documented in [BLUETOOTH-MACOS.md](BLUETOOTH-MACOS.md).
+Device access errors include the underlying HIDAPI error. If macOS denies access,
+review privacy permissions for the terminal or application running the command.
+
+</details>
+
+## Technical documentation
+
+| Document                                      | Contents                                                     |
+| --------------------------------------------- | ------------------------------------------------------------ |
+| [Analysis](docs/analysis.md)                  | Results, evidence boundaries and repository layout           |
+| [USB](docs/usb.md)                            | LED utility, 13-byte macOS framing, retention and readback   |
+| [Bluetooth on macOS](docs/bluetooth-macos.md) | GATT schema, packet tests, capture results and access limits |
+| [Firmware](docs/firmware.md)                  | Pinned image, recovered dispatch tables, PWM path and checks |
 
 ## Licence
 
-Licensed under the [Mozilla Public License 2.0](LICENSE).
+[Mozilla Public License 2.0](LICENSE).

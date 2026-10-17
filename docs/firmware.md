@@ -8,13 +8,13 @@ The official update package supplied the analysis image. Firmware readback
 did not succeed, and no firmware was written to the controller. The recovered
 GIP LED command reaches a dedicated LED task and PWM driver; seven ARM
 emulation tests verify its message and brightness handling. Physical USB
-results and macOS driver framing are recorded in [USB.md](USB.md).
+results and macOS driver framing are recorded in [USB](usb.md).
 
-[Analysis index](ANALYSIS.md) | [Firmware reverse engineering](FIRMWARE.md) | [Bluetooth on macOS](BLUETOOTH-MACOS.md) | [USB](USB.md)
+[Analysis](analysis.md) | [USB](usb.md) | [Bluetooth](bluetooth-macos.md)
 
-## Download and repeat
+## Download and package identity
 
-[FetchXboxFirmware.java](tools/FetchXboxFirmware.java) uses Java 25's standard
+[FetchXboxFirmware.java](../tools/FetchXboxFirmware.java) uses Java 25's standard
 library, with no dependencies or USB access. It downloads one pinned Microsoft
 package, verifies its SHA-256, USB identity, version and component bounds, then
 saves the package and extracts the components. Repeated runs verify existing
@@ -28,7 +28,11 @@ mise exec java@corretto-25 -- jbang tools/FetchXboxFirmware.java target/another-
 mise exec java@corretto-25 -- jbang tools/FetchXboxFirmware.java --self-test
 ```
 
-Files are in [target/firmware/MERL-5.23.6.0](target/firmware/MERL-5.23.6.0):
+Output directory: `target/firmware/MERL-5.23.6.0`.
+
+> [!IMPORTANT]
+> This is a downloaded updater image, separate from installed firmware. No flash
+> dump was obtained and no firmware was updated. Embedded signatures remain unverified.
 
 | File              | Version    | Load address | Bytes     | Contents                                      |
 | ----------------- | ---------- | ------------ | --------- | --------------------------------------------- |
@@ -60,11 +64,10 @@ then checked against the downloaded Microsoft index and package. That project
 also documents UFU update commands; its documented interface provides versions
 and flash hashes, without a byte-read command.
 
-Evidence: [PC feed](target/xbox-firmware-feed.json),
-[console feed](target/xbox-firmware-console-feed.json),
-[download and extraction output](target/xbox-firmware-download.txt).
+Local feed snapshots and download logs: `target/research/firmware/`. Feed versions,
+package identity and hashes are recorded above.
 
-## Exact version search: 5.9.2709.0
+## Installed-version search: 5.9.2709.0
 
 The [MERL archive](https://drive.google.com/drive/folders/1Yo8l4jqgqfHd2OJt_-VhKV_ntUA0U-GT)
 lists `5.3.2569.0`, `5.11.3113.0`, `5.13.3143.0`, `5.13.3146.0`,
@@ -72,10 +75,10 @@ lists `5.3.2569.0`, `5.11.3113.0`, `5.13.3143.0`, `5.13.3146.0`,
 The separate [legacy archive](https://drive.google.com/drive/folders/1-cVQrN7o5yv-V2fOO41AqyE01gdkKyNR)
 contains four MERL manifests. All four were downloaded and inspected.
 
-Also downloaded the oldest bundle listed in the
-[Accessories archive](https://drive.google.com/drive/folders/1OYuGXa89gJIlrbUQIrF4JB-4tNjA7egV):
-`Microsoft.XboxDevices_300.2202.25001.0`, February 2022. Its x64 APPX contains
-these same four packages, with identical SHA-256 values:
+The oldest bundle listed in the
+[Accessories archive](https://drive.google.com/drive/folders/1OYuGXa89gJIlrbUQIrF4JB-4tNjA7egV),
+`Microsoft.XboxDevices_300.2202.25001.0` (February 2022), contains the same four
+packages in its x64 APPX, with identical SHA-256 values:
 
 | Embedded file                          | Package version | Application version |
 | -------------------------------------- | --------------- | ------------------- |
@@ -110,14 +113,9 @@ location reported by the [archive collector](https://www.reddit.com/r/XboxContro
 is `%LOCALAPPDATA%\Packages\Microsoft.XboxDevices_8wekyb3d8bbwe\LocalCache\FirmwareCache`.
 Any candidate still needs its model, package and application versions checked.
 
-Local evidence: [MERL listing](target/xbox-merl-archive-folder.html),
-[legacy listing](target/xbox-legacy-archive-folder.html),
-[bundle listing](target/xbox-accessories-archive-folder.html),
-[package versions and hashes](target/xbox-exact-version-candidates.txt),
-[inspection helper](target/InspectXboxPackages.java),
-[console archive metadata](target/xbox-updater-archive-metadata.json).
-The existing downloader remains pinned to `5.23.6.0`; it does not download the
-requested exact version. No controller operations were performed during this search.
+Local archive listings, candidate-version output and XVD metadata remain in
+`target/research/firmware/`. The downloader stays pinned to `5.23.6.0`.
+No controller operations were performed during this search.
 
 ## Recovering the application correctly
 
@@ -216,7 +214,33 @@ configuration, with a mutable policy limit at `0x2002bee0`. Microsoft's protocol
 unit is not a measured optical-brightness curve. The parser accepts 255 in
 emulation; this exceeds the documented protocol range and is not used on hardware.
 The traced command changes runtime LED state. No flash write was found in
-this path. Physical retention results are recorded in [USB.md](USB.md#brightness-retention).
+this path. Physical retention results are recorded in [USB](usb.md#relative-state-and-retention).
+
+### Recovered GIP dispatch table
+
+Source: generated `gip-handlers.tsv` from the reconstructed RAM table.
+Handler pointers retain their Thumb bit; instruction addresses clear bit 0.
+
+| Entry address | Command key | Handler pointer | Flags  |
+| ------------- | ----------- | --------------- | ------ |
+| `20004638`    | `2006`      | `001026df`      | `0003` |
+| `20004642`    | `200a`      | `1004ac05`      | `0000` |
+| `2000464c`    | `001f`      | `1004aab1`      | `0000` |
+| `20004656`    | `201f`      | `1004ab33`      | `0000` |
+| `20004660`    | `0009`      | `1004aa51`      | `0003` |
+| `2000466a`    | `200c`      | `1004ac87`      | `0000` |
+| `20004674`    | `001e`      | `1004ac45`      | `0000` |
+| `2000467e`    | `201e`      | `1004ac45`      | `0000` |
+
+```mermaid
+flowchart LR
+    GIP[GIP key 0x200a] --> Handler[LED handler 0x1004ac04]
+    Handler --> State[Runtime brightness at offset 0x118]
+    State --> Task8[Task 8: LED mode and timing]
+    Task8 --> Task26[Task 26: hardware LED dispatch]
+    Task26 --> Clamp[Board policy and duty clamp]
+    Clamp --> PWM[PWM registers at 0x8300a700]
+```
 
 ## Defaults and saved configuration
 
@@ -233,7 +257,7 @@ The bytes feed timer calculations at `0x10075268` and `0x100752e4`, rather than
 holding the brightness supplied by the GIP command.
 
 No command to save the requested brightness to controller memory was
-identified. [USB retention results](USB.md#brightness-retention) confirm
+identified. [USB retention results](usb.md#relative-state-and-retention) confirm
 that the LED setting does not survive unplugging USB.
 
 ## Bluetooth vendor service
@@ -272,22 +296,61 @@ at `0x1004072c` only tail-calls the `LEHIDCtrl` diagnostic logger. These paths
 supply no generic GIP tunnel or suspend-to-dim command in the analysed image.
 These findings provide no verified Bluetooth brightness command and do not
 prove the absence of every possible command. The later
-[hardware test](BLUETOOTH-MACOS.md#hidden-hid-and-vendor-write-tests-2026-10-15)
+[hardware test](bluetooth-macos.md#hidden-hid-and-vendor-writes)
 sent four GIP LED packets to the vendor characteristic on installed `5.9.2709.0`.
 All were acknowledged; the user observed no LED change.
 
-The ten additional checks are in [XboxBluetooth.java](tools/ghidra/XboxBluetooth.java).
+The ten additional checks are in [XboxBluetooth.java](../tools/ghidra/XboxBluetooth.java).
 They run against the pinned, reconstructed application and stop before external
 calls. One diagnostic logger is skipped to reach the short-write error response.
 Ghidra's legacy ARM emulator cannot execute the ISA-mode update on the final
 branch-and-link; the tests assert the call-site registers and thunk destination
 instead. They do not emulate the Bluetooth radio, the scheduler or hardware.
-Results: [Bluetooth path checks](target/firmware-analysis/bluetooth-path-verification.txt).
+Results are embedded in the verification table below.
+
+<details>
+<summary>All 26 recovered GATT registration entries</summary>
+
+Source: generated `gatt-handlers.tsv`. Type and flags are raw firmware fields,
+not a direct substitution for the observed ATT property bits. Zero callback
+means no callback pointer in this entry. Vendor UUID suffix:
+`-5f60-4c4f-9c83-a7953298d40d`.
+
+| Entry address | Type | UUID                                   | Raw flags | Callback pointer |
+| ------------- | ---- | -------------------------------------- | --------- | ---------------- |
+| `20004c5c`    | `0`  | `1800`                                 | `0x0000`  | `00000000`       |
+| `20004c78`    | `3`  | `2A00`                                 | `0x0082`  | `00000000`       |
+| `20004c94`    | `3`  | `2A01`                                 | `0x0082`  | `00000000`       |
+| `20004cb0`    | `3`  | `2A04`                                 | `0x0082`  | `10040783`       |
+| `20004ccc`    | `0`  | `1801`                                 | `0x0000`  | `00000000`       |
+| `20004ce8`    | `0`  | `180A`                                 | `0x0000`  | `00000000`       |
+| `20004d04`    | `3`  | `2A29`                                 | `0x0082`  | `00000000`       |
+| `20004d20`    | `3`  | `2A50`                                 | `0x0082`  | `00000000`       |
+| `20004d3c`    | `3`  | `2A26`                                 | `0x0082`  | `00000000`       |
+| `20004d58`    | `3`  | `2A25`                                 | `0x0082`  | `00000000`       |
+| `20004d74`    | `0`  | `180F`                                 | `0x0000`  | `00000000`       |
+| `20004d90`    | `3`  | `2A19`                                 | `0x0092`  | `00000000`       |
+| `20004dac`    | `4`  | `2902`                                 | `0x00c0`  | `100408d7`       |
+| `20004dc8`    | `0`  | `1812`                                 | `0x0000`  | `00000000`       |
+| `20004de4`    | `3`  | `2A4A`                                 | `0x0182`  | `00000000`       |
+| `20004e00`    | `3`  | `2A4C`                                 | `0x0044`  | `1004072d`       |
+| `20004e1c`    | `3`  | `2A4B`                                 | `0x0182`  | `10040813`       |
+| `20004e38`    | `3`  | `2A4D`                                 | `0x0193`  | `00000000`       |
+| `20004e54`    | `4`  | `2902`                                 | `0x00c0`  | `100408db`       |
+| `20004e70`    | `4`  | `2908`                                 | `0x0080`  | `00000000`       |
+| `20004e8c`    | `3`  | `2A4D`                                 | `0x01cf`  | `100408df`       |
+| `20004ea8`    | `4`  | `2908`                                 | `0x0080`  | `00000000`       |
+| `20004ec4`    | `0`  | `00000001-5f60-4c4f-9c83-a7953298d40d` | `0x0000`  | `00000000`       |
+| `20004ee0`    | `3`  | `00000002-5f60-4c4f-9c83-a7953298d40d` | `0x0182`  | `1004095b`       |
+| `20004efc`    | `3`  | `00000003-5f60-4c4f-9c83-a7953298d40d` | `0x0182`  | `1004099d`       |
+| `20004f18`    | `3`  | `00000004-5f60-4c4f-9c83-a7953298d40d` | `0x0148`  | `100409ed`       |
+
+</details>
 
 ## Repeat the offline analysis
 
-[ReverseXboxFirmware.java](tools/ReverseXboxFirmware.java) launches the installed
-Ghidra and [XboxFirmware.java](tools/ghidra/XboxFirmware.java), pins the input
+[ReverseXboxFirmware.java](../tools/ReverseXboxFirmware.java) launches the installed
+Ghidra and [XboxFirmware.java](../tools/ghidra/XboxFirmware.java), pins the input
 hash and vectors, reconstructs startup memory, seeds callbacks and exports
 decompiled C, instruction listings and references. It never opens a controller.
 
@@ -310,12 +373,34 @@ mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java bluetooth
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java inspect 1004ac04 10074ffc 100756f6
 ```
 
-Generated evidence, kept under ignored `target/`:
+### Output layout
 
-- [Decompiled application](target/firmware-analysis/decompiled.c), [function index](target/firmware-analysis/functions.tsv), [instructions](target/firmware-analysis/instructions.txt).
-- [GIP table](target/firmware-analysis/gip-handlers.tsv), [GATT table](target/firmware-analysis/gatt-handlers.tsv), [string references](target/firmware-analysis/string-references.tsv).
-- [Startup emulation](target/firmware-analysis/startup-verification.txt), [seven LED tests](target/firmware-analysis/led-verification.txt), [GATT write emulation](target/firmware-analysis/gatt-verification.txt).
-- [Older handler byte comparison](target/firmware-analysis/older-handler-comparison.txt), [analysis log](target/firmware-reverse-handlers.log).
+| Location under `target/firmware-analysis/`                                                                     | Contents                                                                |
+| -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `projects/`, `settings/`, `cache/`                                                                             | Ghidra working state                                                    |
+| `decompiled.c`, `functions.tsv`, `instructions.txt`                                                            | Decompiled application, function index and instruction listing          |
+| `gip-handlers.tsv`, `gatt-handlers.tsv`                                                                        | Dispatch tables reproduced above                                        |
+| `string-references.tsv`                                                                                        | String cross-references; diagnostic names cited in handler descriptions |
+| `startup-verification.txt`, `led-verification.txt`, `gatt-verification.txt`, `bluetooth-path-verification.txt` | Emulation results reproduced below                                      |
+
+### Recorded emulation results
+
+| Check                       | Inputs                             | Verified result                                                                      |
+| --------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------ |
+| Startup decompression       | Code and data regions              | Firmware emulator and Java decoder produce identical 36,424- and 10,834-byte outputs |
+| LED handler, steady         | Steps 10, 20, 50 and 255           | Four task-8 messages and runtime brightness values match                             |
+| LED handler, off            | Mode 0, step 0                     | Task-8 off message verified                                                          |
+| LED handler, empty          | Length 0                           | Ignored; no state change                                                             |
+| LED handler, reserved byte  | Leading byte 1                     | Ignored; no state change                                                             |
+| Vendor write callback       | Seven bytes                        | Queues task 29, command `0x28`; no GIP opcode dispatch                               |
+| Connected vendor dispatcher | First bytes `00`, `01`, `0a`, `ff` | Four checks: unknown-command logger, brightness unchanged, no task dispatch          |
+| HID output, short           | Lengths 0, 3, 7                    | Three checks: callback rejects                                                       |
+| HID output, accepted        | Lengths 8, 13                      | Two checks: first eight bytes queued as rumble, task 10, message `0x1200`            |
+| HID Control Point           | Callback path                      | One check: tail-call to `LEHIDCtrl` logger only                                      |
+
+> [!NOTE]
+> Steps 50 and 255 test the parser in emulation only. Hardware commands use the
+> documented 0-47 range. These checks do not emulate the radio, scheduler or hardware.
 
 Function names assigned by the script describe recovered roles. Decompiled C
 has inferred types and calling conventions. Ghidra also tries to decompile
@@ -323,11 +408,3 @@ some compressed source bytes as instructions and warns at `0x10088bd4`,
 `0x10088c96`, `0x10088cae` and `0x1008c77a`. Those bytes are not evidence for
 the LED path. The important handler was checked against its instructions and
 emulation. The entire scheduler, hardware and application were not emulated.
-
-## Repository preparation
-
-Created an empty initial commit, then a snapshot of the existing Rust CLI,
-examples, manifests, lockfile, documentation, GATT probe, and five Java analysis
-helpers already present under `target/`. Those five source files were explicitly
-added despite the directory's ignore rule. Build output, downloaded binaries,
-caches, captures, logs, and old working copies were excluded.

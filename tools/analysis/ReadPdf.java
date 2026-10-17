@@ -1,4 +1,4 @@
-//SOURCES ../tools/XboxGattProbe.java
+//SOURCES ../XboxGattProbe.java
 //JAVA_OPTIONS --enable-native-access=ALL-UNNAMED -XstartOnFirstThread
 // SPDX-License-Identifier: MPL-2.0
 //
