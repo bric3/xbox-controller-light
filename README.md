@@ -4,7 +4,7 @@ macOS tools for Xbox Wireless Controller inspection and USB home-button LED cont
 
 | Capability                  | USB `045e:0b12`             | Bluetooth LE `045e:0b13`       |
 | --------------------------- | --------------------------- | ------------------------------ |
-| LED off, brightness, glow   | Verified on hardware        | No working command found       |
+| LED off, brightness, glow   | Verified on hardware        | ⚠️ No working command found    |
 | Identity                    | Java transport inspection   | Rust CLI and Java GATT probe   |
 | Battery                     | No implemented reading      | Coarse HID level; GATT percent |
 | Firmware version            | No implemented reading      | GATT and IORegistry            |
