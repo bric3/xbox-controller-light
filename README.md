@@ -119,6 +119,9 @@ review privacy permissions for the terminal or application running the command.
 
 ## Technical documentation
 
+For direct Bluetooth experiments through a XIAO nRF52840, see the
+[XIAO setup, serial commands and guided tests](docs/bluetooth-xiao.md).
+
 | Document                                      | Contents                                                     |
 | --------------------------------------------- | ------------------------------------------------------------ |
 | [Analysis](docs/analysis.md)                  | Results, evidence boundaries and repository layout           |
