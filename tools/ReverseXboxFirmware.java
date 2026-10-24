@@ -68,8 +68,8 @@ class ReverseXboxFirmware {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length == 0 || !List.of("import", "map-startup", "handlers", "bluetooth", "inspect", "--self-test").contains(args[0]))
-            throw new IllegalArgumentException("Usage: ReverseXboxFirmware.java import | map-startup | handlers | bluetooth | inspect [ADDRESS...] | --self-test");
+        if (args.length == 0 || !List.of("import", "map-startup", "handlers", "bluetooth", "indirect", "inspect", "--self-test").contains(args[0]))
+            throw new IllegalArgumentException("Usage: ReverseXboxFirmware.java import | map-startup | handlers | bluetooth | indirect | inspect [ADDRESS...] | --self-test");
 
         byte[] bytes = Files.readAllBytes(IMAGE);
         var data = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
@@ -118,16 +118,21 @@ class ReverseXboxFirmware {
             command.addAll(List.of("-process", "component-3.bin", "-analysisTimeoutPerFile", "300",
                     "-preScript", "XboxFirmware.java", args[0], output.toString(),
                     "-postScript", "XboxFirmware.java", "export", output.toString()));
-        } else if (args[0].equals("bluetooth")) {
+        } else if (List.of("bluetooth", "indirect").contains(args[0])) {
             command.addAll(List.of("-process", "component-3.bin", "-readOnly", "-noanalysis",
-                    "-postScript", "XboxBluetooth.java", output.toString()));
+                    "-postScript", args[0].equals("bluetooth") ? "XboxBluetooth.java" : "XboxIndirectBrightness.java", output.toString()));
         } else {
             command.addAll(List.of("-process", "component-3.bin", "-readOnly", "-noanalysis",
                     "-postScript", "XboxFirmware.java", "inspect", output.toString()));
             command.addAll(List.of(args).subList(1, args.length));
         }
+        Path indirectResult = output.resolve("indirect-brightness-verification.txt");
+        if (args[0].equals("indirect")) Files.deleteIfExists(indirectResult);
         var process = new ProcessBuilder(command).inheritIO();
         int status = process.start().waitFor();
         if (status != 0) throw new IllegalStateException("Ghidra exited with status " + status);
+        if (args[0].equals("indirect") && (!Files.isRegularFile(indirectResult)
+                || !Files.readString(indirectResult).endsWith("PASS: all indirect brightness checks completed; external services mocked, no hardware writes." + System.lineSeparator())))
+            throw new IllegalStateException("Ghidra did not complete the indirect brightness checks; inspect its script diagnostics");
     }
 }

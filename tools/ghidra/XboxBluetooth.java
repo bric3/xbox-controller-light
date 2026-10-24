@@ -21,6 +21,9 @@ public class XboxBluetooth extends GhidraScript {
     protected void run() throws Exception {
         Path output = Path.of(getScriptArgs()[0]).resolve("bluetooth-path-verification.txt");
         try (var writer = new PrintWriter(Files.newBufferedWriter(output))) {
+            verifyIngress(writer);
+            verifyClamp(writer);
+            verifyVendorStates(writer);
             long host = Integer.toUnsignedLong(getInt(toAddr(0x1004cc54L)));
             long app = Integer.toUnsignedLong(getInt(toAddr(0x1004cc50L)));
             // Test the connected wireless state and its unknown-command destination directly.
@@ -96,6 +99,128 @@ public class XboxBluetooth extends GhidraScript {
             }
         }
         println("Bluetooth path checks passed: " + output);
+    }
+
+    private void verifyIngress(PrintWriter writer) throws Exception {
+        if (getInt(toAddr(0x1002aa50L)) != 0x20005831 || Short.toUnsignedInt(getShort(toAddr(0x20005858L))) != 0xe7fe)
+            throw new AssertionError("Expected non-returning firmware assertion handler");
+        for (int source : new int[]{4, 17, 24}) {
+            var emulator = emulator();
+            try {
+                emulator.writeRegister("r0", source);
+                emulator.writeRegister("r2", PAYLOAD);
+                emulator.writeRegister("r3", 7);
+                long stop = trace(emulator, 0x1004acd2L, Set.of(0x1004ad0aL, 0x1004acfcL), writer);
+                if (source == 24) {
+                    if (stop != 0x1004acfcL) throw new AssertionError("BLE ingress did not assert");
+                    writer.println("GIP ingress from BLE task 24: reaches assertion before GIP parser.");
+                } else {
+                    if (stop != 0x1004ad0aL || emulator.readRegister("r0").intValue() != (source == 4 ? 1 : 2)
+                            || emulator.readRegister("r1").longValue() != PAYLOAD
+                            || emulator.readRegister("r2").intValue() != 7)
+                        throw new AssertionError("Unexpected GIP ingress route");
+                    writer.printf("GIP ingress from task %d: forwards payload to GIP parser with transport %d.%n",
+                            source, emulator.readRegister("r0").intValue());
+                }
+            } finally { emulator.dispose(); }
+        }
+    }
+
+    private void verifyClamp(PrintWriter writer) throws Exception {
+        long state = Integer.toUnsignedLong(getInt(toAddr(0x10075834L)));
+        for (int cap : new int[]{0, 5, 20, 100}) {
+            for (int requested : new int[]{0, 5, 20, 47}) {
+                var emulator = emulator();
+                try {
+                    emulator.writeMemoryValue(toAddr(state + 0x48), 1, cap);
+                    emulator.writeRegister("r0", 0);
+                    emulator.writeRegister("r1", requested);
+                    long stop = trace(emulator, 0x100757fcL, Set.of(0x10075814L, 0x1007581aL), writer);
+                    int expected = Math.min(cap, requested);
+                    if (stop != (expected == 0 ? 0x1007581aL : 0x10075814L)
+                            || emulator.readRegister("r1").intValue() != expected)
+                        throw new AssertionError("Unexpected brightness clamp");
+                    writer.printf("LED policy cap %d, requested %d: PWM brightness %d (%s path).%n",
+                            cap, requested, expected, expected == 0 ? "off" : "on");
+                } finally { emulator.dispose(); }
+            }
+        }
+    }
+
+    private void verifyVendorStates(PrintWriter writer) throws Exception {
+        long host = Integer.toUnsignedLong(getInt(toAddr(0x1004cc54L)));
+        long app = Integer.toUnsignedLong(getInt(toAddr(0x1004cc50L)));
+        long[] entries = {0x1004bd54L, 0x00106864L, 0x1004bdd0L, 0x00106cf8L, 0x00106cf8L, 0x00107498L,
+                0x1004c5caL, 0x1004c324L, 0x1004c390L, 0x1004c406L, 0x1004c4c8L, 0x1004c514L};
+        String[] names = {"idle", "detect", "enrolling", "connected radio", "connected BLE", "connected USB",
+                "switching", "enrolment 0", "enrolment 1", "enrolment 2", "enrolment 3", "enrolment 4"};
+        for (int state = 0; state < entries.length; state++) {
+            for (int first : new int[]{0, 10, 255}) {
+                var emulator = emulator();
+                try {
+                    emulator.writeMemory(toAddr(host), new byte[0x500]);
+                    emulator.writeMemory(toAddr(app), new byte[0x200]);
+                    emulator.writeMemoryValue(toAddr(host + 4), 1, 29);
+                    emulator.writeMemoryValue(toAddr(host + 0x11), 1, state == 3 ? 2 : state == 5 ? 1 : 3);
+                    emulator.writeMemoryValue(toAddr(app + 0x118), 1, 0xa5);
+                    emulator.writeMemory(toAddr(PAYLOAD), new byte[]{(byte)first, 0x20, 1, 3, 0, 1, 10});
+                    if (state >= 3 && state <= 5) {
+                        emulator.writeRegister("r0", host);
+                        emulator.writeRegister("r1", 24);
+                        emulator.writeRegister("r2", 0x28);
+                        emulator.writeRegister("r3", PAYLOAD);
+                        emulator.writeStackValue(0, 4, 7);
+                        emulator.writeStackValue(4, 4, 0);
+                    } else {
+                        emulator.writeRegister("r0", 24);
+                        emulator.writeRegister("r1", 0x28);
+                        emulator.writeRegister("r2", PAYLOAD);
+                        emulator.writeRegister("r3", 7);
+                        emulator.writeStackValue(0, 4, 0);
+                    }
+                    String result = traceVendorState(emulator, entries[state]);
+                    if (Byte.toUnsignedInt(emulator.readMemoryByte(toAddr(app + 0x118))) != 0xa5)
+                        throw new AssertionError("Unexpected vendor brightness change");
+                    writer.printf("Vendor command 0x28, state %s, payload %02x: %s; no task dispatch, brightness unchanged.%n",
+                            names[state], first, result);
+                    writer.flush();
+                } finally { emulator.dispose(); }
+            }
+        }
+    }
+
+    private String traceVendorState(EmulatorHelper emulator, long start) throws Exception {
+        emulator.writeRegister("pc", start);
+        for (int step = 0; step < 2000; step++) {
+            long pc = emulator.getExecutionAddress().getOffset();
+            if (pc == 0x100a4f00L) return "returned";
+            // Enrolment dispatch is checked separately through each of its five callbacks.
+            if (start == 0x1004bdd0L && pc == 0x1004bf42L) return "enrolment subdispatch boundary";
+            var function = getFunctionAt(toAddr(pc));
+            if (pc == 0x1004a9aeL || (function != null && function.getName().contains("1004a9ae")))
+                return "unknown-command logger";
+            if (Set.of(0x001043b4L, 0x001043a4L, 0x001042ceL, 0x001042beL, 0x1004ac04L,
+                    0x10074ffcL, 0x100756f6L).contains(pc))
+                throw new AssertionError("Vendor state reached a task dispatch at " + Long.toHexString(pc));
+            var instruction = getInstructionAt(toAddr(pc));
+            var containing = getFunctionContaining(toAddr(pc));
+            if (instruction != null && (instruction.getFlowType().isTerminal()
+                    || (instruction.getMnemonicString().startsWith("pop") && instruction.toString().contains("pc")))
+                    && containing != null && containing.getEntryPoint().getOffset() == start)
+                return "return boundary";
+            if (instruction != null && instruction.getFlowType().isCall() && instruction.getFlows().length == 1) {
+                var target = getFunctionAt(instruction.getFlows()[0]);
+                if (target != null && target.getName().contains("1003eef4")) {
+                    // The ingress diagnostic logger has no role in command routing.
+                    emulator.writeRegister("pc", instruction.getMaxAddress().next().getOffset());
+                    continue;
+                }
+                if (target != null && target.getName().contains("1004a9ae")) return "unknown-command logger";
+            }
+            if (!emulator.step(monitor)) throw new AssertionError("Vendor state stopped at "
+                    + Long.toHexString(pc) + ": " + emulator.getLastError());
+        }
+        throw new AssertionError("Vendor state instruction limit exceeded");
     }
 
     private EmulatorHelper emulator() {

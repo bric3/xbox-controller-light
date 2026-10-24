@@ -1,6 +1,6 @@
 # Firmware reverse engineering
 
-Updated: 2026-10-15. Analysed application: Microsoft MERL `5.23.6.0`,
+Updated: 2026-10-24. Analysed application: Microsoft MERL `5.23.6.0`,
 component 3, for the `045e:0b12` hardware family. The connected controller
 reports `5.9.2709.0`; its exact application image remains unavailable.
 
@@ -66,6 +66,25 @@ and flash hashes, without a byte-read command.
 
 Local feed snapshots and download logs: `target/research/firmware/`. Feed versions,
 package identity and hashes are recorded above.
+Both GA feeds were downloaded again on 2026-10-24. They still advertise
+`5.23.6.0` for MERL; the latest installed-controller read remains `5.9.2709.0`.
+The [analysis version table](analysis.md#firmware-versions) separates advertised,
+installed and analysed versions.
+
+Refresh the two Microsoft indexes without changing a controller:
+
+```sh
+mkdir -p target/research/firmware
+curl --fail --location https://aka.ms/xboxaccessoriesfwcdnxbga \
+  --output target/research/firmware/xbox-ga-2026-10-24.json
+curl --fail --location https://aka.ms/xboxaccessoriesfwcdnpcga \
+  --output target/research/firmware/pc-ga-2026-10-24.json
+```
+
+In each index, use the `d` entry with `__n: merl`, `id: 045E_0B12`.
+Its `f[].p` filename identifies the offered package version; `req[].v`
+identifies a prerequisite. The downloader remains pinned for reproducible
+analysis and does not select the latest feed entry automatically.
 
 ## Installed-version search: 5.9.2709.0
 
@@ -260,6 +279,205 @@ No command to save the requested brightness to controller memory was
 identified. [USB retention results](usb.md#relative-state-and-retention) confirm
 that the LED setting does not survive unplugging USB.
 
+### Indirect brightness controls
+
+The 2026-10-24 investigation excludes pairing, connection, identification and
+blink patterns as brightness-control avenues. The strongest candidate is a
+separate EEPROM-backed cap applied below the transport-specific LED handlers.
+
+| Stage                  | Address or value               | Recovered behaviour                                                                                                  |
+| ---------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Load configuration     | `0x1004a380`                   | Reads logical EEPROM record 0, length 26, into application state at `0x200040c8 + 0x11`                              |
+| Compiled fallback      | `0x1004adb4`, byte 22 (`0x16`) | Cap byte is `0x50` (80); the installed controller's record-0 byte 22 also reads as 80                                |
+| Forward startup policy | `0x10052534`                   | Copies application offset `0x27` into task 26 initialisation command `0xff03`, length 1; runtime request becomes 100 |
+| Set driver cap         | `0x10075404`                   | Stores initialisation byte at `0x2002bee0` when the hardware task is inactive                                        |
+| Apply cap              | `0x100757fc`                   | Calls the off path for zero, otherwise forwards `min(requested, cap)` towards PWM                                    |
+| Internal record writer | `0x1004a454`                   | Requests task 13 command `0x303` for record 0, length 26, using the cached configuration                             |
+
+The cap is an internal numeric limit, not a percentage or the utility's
+user-facing 0-47 range. Emulation runs the record loader, startup forwarding,
+driver initialisation and clamp, with the EEPROM read mocked:
+
+| Simulated record-0 cap | Request 20 reaches PWM as | Request 100 reaches PWM as |
+| ---------------------- | ------------------------- | -------------------------- |
+| 0                      | 0, off path               | 0, off path                |
+| 5                      | 5                         | 5                          |
+| 20                     | 20                        | 20                         |
+| 80                     | 20                        | 80                         |
+
+Changing this stored limit could constrain steady Bluetooth brightness after
+startup. That is a candidate mechanism; persistence and installed-version
+behaviour have not been tested on the physical controller. Repeating
+initialisation while task 26 is already active leaves its cap unchanged.
+
+The application has a concrete internal write candidate at `0x00102180`.
+Its message handler is installed through the vtable at `0x10085958`, entry
+`+0x18`, by constructor `0x1004a330`.
+
+> An internal command is a scheduler message between firmware tasks. Its numeric
+> identifier does not establish a USB opcode, HID report or Bluetooth packet.
+
+Internal command 8 copies the cached 26-byte record to application offset
+`0x2b`, then copies the supplied payload and length to offset `0x31` before
+requesting the whole-record write. That destination corresponds to record
+offset 6. An offline six-byte payload preserves the cap. A constructed 17-byte
+payload reaches record offset 22 and changes only that byte from 80 to 5 while
+preserving every other record byte. Execution stops at the EEPROM service
+boundary, before a write. The factory dispatcher also accepts a 17-byte
+command-8 payload at permission level 1 in emulation, as described below.
+These checks establish the separate dispatch and copy operations. The
+[physical campaign](brightness-campaign.md#recorded-physical-results-2026-10-24)
+subsequently read the installed record without writing it.
+
+The EEPROM service supplies an additional boundary. Its record table at
+`0x10079c34` gives record 0 logical address `0x0060` and a maximum payload of
+29 bytes; this application reads and writes 26 bytes. Emulating `0x1006c490`
+verifies that lookup. Emulating `0x1006c77a` verifies the storage frame:
+record ID, payload length, payload, then the eight-bit additive payload checksum.
+A 26-byte payload therefore occupies 29 bytes including the header and checksum.
+The synchronous write helper at `0x1006c810` calls the NV manager through
+`0x1006d4ae`, reads the block back through `0x1006d40c`, and checks its ID,
+length, data and checksum. Storage calls were inspected, without executing them.
+
+Record 0 also carries device identity data. A usable persistent-control command
+requires an identified ingress, a complete record read, a preserved original,
+verified write/restore semantics, and validation on the installed firmware.
+The physical USB read returned two identical 32-byte slots with ID 0, payload
+length 26 and a valid checksum. Payload byte 22 was 80. The installed firmware
+returns a two-byte address for record lookup, matching the Windows USB driver;
+the analysed newer image returns capacity and address in three bytes. Reading
+the stored byte does not establish its optical effect on installed firmware.
+
+The Windows driver's record-write command is `0x0306`, selector 3, with inline
+payload `{recordId, length, data...}`. NV dispatcher `0x1006c90e` passes that
+payload to the record writer. After explicit authorisation, the physical
+campaign attempted this command with the original record unchanged. No matching
+completion arrived; two subsequent reads verified the original full slot
+intact. The runner stopped before cap 5. No working write or restoration was
+established. No factory reset or firmware update was performed.
+
+#### Factory command ingress and permissions
+
+The [Windows USB driver](windows-drivers.md#usb-and-xbox-wireless-test-commands)
+exposes vendor requests and a GIP test-command wrapper. Both map external
+selectors to internal tasks through the table at `0x1007ac08`:
+
+| Selector | Internal task    | Relevant operation                                            |
+| -------- | ---------------- | ------------------------------------------------------------- |
+| 3        | 13, NV manager   | Record lookup `0x308`, raw read `0x300`, record write `0x306` |
+| 10       | 26, LED hardware | Hardware LED messages                                         |
+| 11       | 8, LED modes     | Steady brightness `0x0b01`                                    |
+| 14       | 4, application   | Configuration copy, command 8                                 |
+| 22       | 18, memory       | Memory read `0x1601`                                          |
+
+For USB, `0x1005d26c` accepts vendor OUT `bmRequestType=0x40`, request
+`0x10`, subject to command permission. `0x1005d180` reads the selector from
+the high byte of `wValue`, flags from its low byte, and the message code from
+`wIndex`, then queues the request with its data length. The observed driver
+EEPROM requests use selector 3. Vendor IN `c0 00`, value `0x0008`, index
+`0xff00` obtains the buffered response when permission allows it. This
+translation was recovered statically. The later physical campaign confirmed
+endpoint-zero vendor transfers, factory LED control and record reads while
+Apple's driver remained attached.
+
+For GIP, opcode `0x1f`, flags zero, payload beginning with 2 reaches handler
+`0x1004aab0`, which strips that byte and queues task 3 command `0x20e`.
+Dispatcher `0x1006f972` expects this remaining frame:
+
+```text
+flags:u8 selector:u8 message:LE16 length:LE16 data:length
+```
+
+It requires at least six header bytes, a complete declared payload, a permitted
+command, and a selector mapping below task 30. The permission gate at
+`0x10054890` compares the full `message | flags << 16` value on this path;
+the USB admission check uses the 16-bit message. Passing a USB flag byte
+through the GIP wrapper therefore does not establish identical admission.
+
+The reconstructed startup value at `0x20006a5a` is permission level 2.
+Its whitelist at `0x100885b8` contains only `0xff00`, `0x020f`, `0x0210`
+and `0x0211`. Three sequential internal requests, `0x020f` with `0x51db`,
+`0x0210` with `0xff6e`, then `0x0211` with `0xabaa`, lower the RAM permission
+to level 1. A wrong final key resets the sequence and leaves permission at 2.
+The later USB campaign returned a successful `0x0211` reply after these keys,
+then accepted the LED and NV read commands. BLE writes carrying the keys were
+acknowledged without a visible light change or evidence of an internal unlock.
+
+Level 1 permits application command 8, LED `0x0b01`, and NV reads `0x300`
+and `0x308`. The 127-entry whitelist at `0x1007ab08` excludes record write
+`0x0306`, memory read `0x1601` and RAM write `0x1605`. Permission level 0
+admits all messages, but no authorised application-mode route to that level
+has been established. A live `0x1601` read at `0x10027000` returned no matching
+reply after the normal unlock; no application image was obtained. The read
+and unchanged-record write failures are consistent with this gate, without
+proving the installed older firmware uses the same implementation.
+
+Offline execution verifies 36 gate cases, 16 dispatcher cases
+and six unlock steps. The dispatcher checks cover command 8 with lengths
+6 and 17, steady LED and record lookup; level-2 and truncated frames enqueue
+nothing. Execution stops before the scheduler processes a request. These are
+separate fixture checks, without full transport, scheduler or storage emulation.
+
+This resolves a factory ingress to the configuration candidate for USB/GIP.
+The existing generic GIP ingress rejects BLE source task 24 before parsing,
+and the BLE GATT callbacks do not feed this factory dispatcher. A factory
+message number is therefore insufficient to construct a new XIAO BLE trial.
+
+#### L2CAP channel registry
+
+The nine-entry registry at `0x1007b388`, count byte `0x100421f6`, is consulted
+by `0x1003c80c` and `0x1003c888`. Its entries contain two callback pointers.
+The offline checks execute both callbacks for the first eight entries:
+
+| PSM                | Registered callbacks in this image              |
+| ------------------ | ----------------------------------------------- |
+| `0x0001`, `0x0003` | Constant return `0x03fffff1`                    |
+| `0x0017`, `0x001b` | First returns zero, second returns `0x03fffff1` |
+| `0x0019`, `0x3a27` | Constant return `0x03fffff1`                    |
+| `0x0011`, `0x0013` | Constant return `0x03fffff1`                    |
+| `0x001f`           | ATT functions `0x100791bc` and `0x100790da`     |
+
+The unfamiliar `0x3a27` entry supplies two constant-return stubs, without
+command processing. It also lies outside the
+[Bluetooth LE SPSM range](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-54/out/en/host/logical-link-control-and-adaptation-protocol-specification.html):
+LE credit-based services use `0x0001` through `0x00ff`. No distinct LE GIP
+service was identified in this registry. This is a bounded result for the
+analysed image, without testing arbitrary channels on installed firmware.
+
+#### Other indirect controls and verification
+
+Other indirect mechanisms were checked against the same pinned application:
+
+| Candidate                | Offline evidence                                                                                                                     | Result and boundary                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| Colour weighting         | `0x10075908` stores coefficients 0, 1, 20, 100 and 255; `0x1007586c` bypasses scaling for the one-channel descriptor at `0x1007d8a8` | All five cases forward duty 20 for request 20; no dimming through coefficients on this board                          |
+| Rumble flag bits         | `0x10078438`, all 128 flag values reachable after the BLE callback clears bit 7                                                      | Bits 0-3 select motors; bits 4-6 supply no LED route; application brightness and cap stay unchanged                   |
+| Low-battery motor policy | `0x100783d4`, battery levels 0-4                                                                                                     | Levels below 2 stop two grip motors; this callback leaves LED brightness and cap unchanged                            |
+| Shared PWM configuration | Output table `0x100848b8`; motor mapping `0x10076210`                                                                                | LED uses group 0, channel `0x25`; motors use different groups and channels; analogue supply effects remain unmeasured |
+
+The checks are implemented in
+[XboxIndirectBrightness.java](../tools/ghidra/XboxIndirectBrightness.java).
+They execute firmware instructions with synthetic RAM fixtures and mock
+EEPROM reads, diagnostics, scheduler responses and motor hardware calls.
+Thumb calls and returns are implemented explicitly to work around the legacy
+emulator's ISA-switch failure; three firmware `memcpy` cases check that helper.
+The tests establish bounded data and control flow, without simulating the radio,
+full scheduler, non-volatile storage or physical light output.
+
+```sh
+GHIDRA_INSTALL_DIR="$PWD/target/ghidra-native/install" \
+  mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java indirect
+
+# Inspect the configuration loader, startup forwarding and internal message handler.
+GHIDRA_INSTALL_DIR="$PWD/target/ghidra-native/install" \
+  mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java \
+  inspect 1004a380 10052534 00102180 1004a454
+```
+
+The first command writes `target/firmware-analysis/indirect-brightness-verification.txt`
+and requires a final PASS marker. Both commands use the existing Ghidra project
+read-only and never open a controller.
+
 ## Bluetooth vendor service
 
 Reconstructing initialised RAM exposes all 26 GATT registration entries at
@@ -300,13 +518,84 @@ prove the absence of every possible command. The later
 sent four GIP LED packets to the vendor characteristic on installed `5.9.2709.0`.
 All were acknowledged; the user observed no LED change.
 
-The ten additional checks are in [XboxBluetooth.java](../tools/ghidra/XboxBluetooth.java).
+The Bluetooth-path checks are in [XboxBluetooth.java](../tools/ghidra/XboxBluetooth.java).
 They run against the pinned, reconstructed application and stop before external
 calls. One diagnostic logger is skipped to reach the short-write error response.
 Ghidra's legacy ARM emulator cannot execute the ISA-mode update on the final
 branch-and-link; the tests assert the call-site registers and thunk destination
 instead. They do not emulate the Bluetooth radio, the scheduler or hardware.
 Results are embedded in the verification table below.
+
+### Console brightness and Bluetooth ingress
+
+Microsoft's [night-mode announcement](https://news.xbox.com/en-us/2021/10/21/october-2021-xbox-update/)
+confirms controller dimming on Xbox consoles. The controller's
+[connectivity specification](https://www.xbox.com/en-US/accessories/controllers/xbox-wireless-controller)
+separates Xbox Wireless for console connections from Bluetooth for PCs and
+mobile devices. A console's brightness capability establishes a working
+controller LED path, without establishing a Bluetooth command.
+
+The later [Windows driver analysis](windows-drivers.md) traces
+`SetHomeLedIntensity` through IOCTL `0x40001c60` to a host policy and ordinary
+GIP `0x0a` packets. Its separate XInput HID LED-state operation updates a host
+cache without sending HID output. The console UI's implementation remains
+unverified.
+
+The [xone LED command](https://github.com/medusalix/xone/blob/master/bus/protocol.c)
+uses GIP opcode `0x0a`, mode and brightness. Its
+[wireless transport](https://github.com/medusalix/xone/blob/master/transport/dongle.c)
+uses MediaTek/IEEE 802.11 framing. The XIAO's
+[nRF52840 radio](https://docs.nordicsemi.com/r/bundle/ps_nrf52840/page/keyfeatures_html5.html)
+supports BLE, IEEE 802.15.4 and Nordic proprietary FSK modes, and cannot substitute
+for that Xbox Wireless transport.
+
+The reconstructed firmware supplies a matching boundary at `0x1004acd2`:
+
+| Sender task | Recovered route                                       | Emulation result                               |
+| ----------- | ----------------------------------------------------- | ---------------------------------------------- |
+| `4`         | USB-side ingress into `0x100545f0`, transport value 1 | Payload pointer and length forwarded unchanged |
+| `17`        | Radio-side ingress, transport value 2                 | Payload pointer and length forwarded unchanged |
+| `24`        | Bluetooth task                                        | Assertion at `0x1004acfc`, before parser entry |
+
+These checks stop before the parser branch or assertion call. The ingress
+routine also contains an assertion for sender task `14`; that branch was
+inspected but is outside the three emulated cases. The ordinary HID output
+callback takes its separate rumble path and does not enter this GIP receiver.
+
+The assertion thunk at `0x1002aa4c` points to `0x20005830`, executable code
+inside the reconstructed RAM initialisation region. Its handler records the
+call location and line, invokes diagnostic helpers, optionally executes
+`bkpt 0xff`, and ends in an infinite branch at `0x20005858`. It supplies no
+return to the GIP parser. The ingress checks verify both the thunk destination
+and that terminal branch; they do not trigger an assertion on the controller.
+
+```sh
+mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java \
+  inspect 1004acd2 1002aa50 code:20005830
+```
+
+The LED driver clamps its requested value against the channel policy byte at
+`0x2002bee0`. Sixteen emulation cases verify `min(requested, cap)` for requests
+0, 5, 20 and 47 and caps 0, 5, 20 and 100. Zero selects the off path. The policy
+setter at `0x10075404` receives task-initialisation data and writes the cap;
+no Bluetooth-accessible policy setter was established.
+
+Vendor command `0x28` was checked in idle, detection, enrolment, switching,
+connected radio, connected BLE and connected USB states. The five enrolment
+substates were checked separately. Each used payload first bytes `00`, `0a`
+and `ff`, with source task 24 and length 7. All 36 checks reached return,
+unknown-command or enrolment-subdispatch boundaries without changing the
+application brightness byte or reaching a task queue. The enrolment parent
+stops before calling its subdispatcher; the five callback checks cover those
+substates independently. The initial diagnostic logger is skipped in the
+detection state. These are bounded control-flow checks, not scheduler emulation.
+
+Together with the ten earlier Bluetooth checks, the three ingress cases and
+sixteen clamp cases produce 65 passing checks under Ghidra 12.2. They analyse
+`5.23.6.0`; the controller still runs `5.9.2709.0`. The installed-version
+difference remains a reason to test its HID Control Point directly. The
+[XIAO reference](bluetooth-xiao.md) records direct writes and the additional
+Suspend/Resume experiment.
 
 <details>
 <summary>All 26 recovered GATT registration entries</summary>
@@ -368,10 +657,32 @@ mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java import
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java map-startup
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java handlers
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java bluetooth
+mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java indirect
 
 # Read-only inspection of selected addresses; code: defines a missing function temporarily.
 mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java inspect 1004ac04 10074ffc 100756f6
 ```
+
+The local Ghidra 12.2 package had no `decompile` executable for Apple Silicon.
+The additional checks used a private copy under `target/`, with its bundled
+native source compiled locally. The installed Ghidra was unchanged:
+
+```sh
+mkdir -p target/ghidra-native
+cp -cR "$(brew --prefix ghidra)/libexec" target/ghidra-native/install
+cp -R "$(brew --prefix ghidra)/libexec/Ghidra/Features/Decompiler/src/decompile/cpp" target/ghidra-native/cpp
+make -C target/ghidra-native/cpp -j4 ghidra_opt \
+  ARCH_TYPE='-arch arm64' ADDITIONAL_FLAGS='-mmacosx-version-min=13.0'
+mkdir -p target/ghidra-native/install/Ghidra/Features/Decompiler/os/mac_arm_64
+cp target/ghidra-native/cpp/ghidra_opt \
+  target/ghidra-native/install/Ghidra/Features/Decompiler/os/mac_arm_64/decompile
+
+GHIDRA_INSTALL_DIR="$PWD/target/ghidra-native/install" \
+  mise exec java@corretto-25 -- jbang tools/ReverseXboxFirmware.java bluetooth
+```
+
+Run the copy commands once into a new `target/ghidra-native` directory. The
+emulation and inspection commands continue to use a read-only firmware project.
 
 ### Output layout
 

@@ -121,6 +121,8 @@ review privacy permissions for the terminal or application running the command.
 
 For direct Bluetooth experiments through a XIAO nRF52840, see the
 [XIAO setup, serial commands and guided tests](docs/bluetooth-xiao.md).
+The [brightness campaign](docs/brightness-campaign.md) runs factory-format BLE
+trials, USB runtime commands and EEPROM reads through untimed native dialogs.
 
 | Document                                      | Contents                                                     |
 | --------------------------------------------- | ------------------------------------------------------------ |
