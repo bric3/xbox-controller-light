@@ -8,6 +8,11 @@ controller. Apple's HID report mapping and CoreBluetooth service restrictions
 are outside this path. This provides a transport for experiments; a Bluetooth
 brightness command remains unverified until a repeatable visual change is observed.
 
+The initial trials used `5.9.2709.0`. The
+[post-update campaign](brightness-campaign.md#post-update-results-52360)
+confirmed `5.23.6.0` over GATT and repeated seven LED formats and HID
+Suspend/Resume. All left the light unchanged; USB brightness still worked.
+
 ## Setup
 
 Run commands from the repository root. Install Arduino CLI with Homebrew:
@@ -141,6 +146,11 @@ The firmware accepts ASCII lines at 115200 baud. Arguments use lowercase hex,
 except decimal address type. Handles and offsets use four hex digits. Send one
 request at a time and wait for its response. A successful SoftDevice submission
 does not emit a success line; completion arrives in the GATT response.
+
+The Java runner retries `ERROR SOFTDEVICE 00000011` (busy) only for
+`SERVICES`, `CHARS`, `DESCS` and `READ`, with at most ten retries 100 ms apart.
+Writes, other errors and timeouts stop the request. A busy submission has not
+queued the requested operation.
 
 Use the Java runner for an individual command:
 

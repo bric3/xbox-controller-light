@@ -1,16 +1,25 @@
 # Firmware reverse engineering
 
 Updated: 2026-10-24. Analysed application: Microsoft MERL `5.23.6.0`,
-component 3, for the `045e:0b12` hardware family. The connected controller
-reports `5.9.2709.0`; its exact application image remains unavailable.
+component 3, for the `045e:0b12` hardware family. The controller was updated
+from `5.9.2709.0`; the user's post-update USB readback confirms application
+`5.23.6.0`. The earlier exact `5.9.2709.0` application image remains unavailable.
+Fresh XIAO GATT discovery independently confirmed `5.23.6.0`. The
+[post-update campaign](brightness-campaign.md#post-update-results-52360)
+repeated seven BLE LED formats and HID Suspend/Resume without a light change;
+both USB LED paths worked.
 
-The official update package supplied the analysis image. Firmware readback
-did not succeed, and no firmware was written to the controller. The recovered
+The official update package supplied the analysis image. Application flash
+readback did not succeed. The user subsequently completed the USB update. The recovered
 GIP LED command reaches a dedicated LED task and PWM driver; seven ARM
 emulation tests verify its message and brightness handling. Physical USB
 results and macOS driver framing are recorded in [USB](usb.md).
 
 [Analysis](analysis.md) | [USB](usb.md) | [Bluetooth](bluetooth-macos.md)
+
+For downloads, component versions and USB update commands, see
+[firmware updates](firmware-update.md). This reference records firmware structure,
+recovered control paths and offline verification.
 
 ## Download and package identity
 
@@ -31,8 +40,9 @@ mise exec java@corretto-25 -- jbang tools/FetchXboxFirmware.java --self-test
 Output directory: `target/firmware/MERL-5.23.6.0`.
 
 > [!IMPORTANT]
-> This is a downloaded updater image, separate from installed firmware. No flash
-> dump was obtained and no firmware was updated. Embedded signatures remain unverified.
+> The analysed bytes come from Microsoft's package. Post-update component
+> versions match that package, but no installed flash dump or byte comparison
+> was obtained. Embedded signatures remain unverified by this project.
 
 | File              | Version    | Load address | Bytes     | Contents                                      |
 | ----------------- | ---------- | ------------ | --------- | --------------------------------------------- |
@@ -67,7 +77,9 @@ and flash hashes, without a byte-read command.
 Local feed snapshots and download logs: `target/research/firmware/`. Feed versions,
 package identity and hashes are recorded above.
 Both GA feeds were downloaded again on 2026-10-24. They still advertise
-`5.23.6.0` for MERL; the latest installed-controller read remains `5.9.2709.0`.
+`5.23.6.0` for MERL. The user's post-update USB readback now reports that
+application version; [the update record](firmware-update.md#recorded-update-result)
+preserves the component versions, addresses and sizes.
 The [analysis version table](analysis.md#firmware-versions) separates advertised,
 installed and analysed versions.
 
@@ -86,7 +98,7 @@ Its `f[].p` filename identifies the offered package version; `req[].v`
 identifies a prerequisite. The downloader remains pinned for reproducible
 analysis and does not select the latest feed entry automatically.
 
-## Installed-version search: 5.9.2709.0
+## Pre-update image search: 5.9.2709.0
 
 The [MERL archive](https://drive.google.com/drive/folders/1Yo8l4jqgqfHd2OJt_-VhKV_ntUA0U-GT)
 lists `5.3.2569.0`, `5.11.3113.0`, `5.13.3143.0`, `5.13.3146.0`,
@@ -342,11 +354,12 @@ length, data and checksum. Storage calls were inspected, without executing them.
 Record 0 also carries device identity data. A usable persistent-control command
 requires an identified ingress, a complete record read, a preserved original,
 verified write/restore semantics, and validation on the installed firmware.
-The physical USB read returned two identical 32-byte slots with ID 0, payload
-length 26 and a valid checksum. Payload byte 22 was 80. The installed firmware
-returns a two-byte address for record lookup, matching the Windows USB driver;
-the analysed newer image returns capacity and address in three bytes. Reading
-the stored byte does not establish its optical effect on installed firmware.
+Physical USB reads on both `5.9.2709.0` and `5.23.6.0` returned identical
+32-byte slots with ID 0, payload length 26 and a valid checksum. Payload byte
+22 remains 80. The USB record-lookup reply remained a two-byte address, matching
+the Windows USB driver. Offline analysis recovers a three-byte capacity/address
+result; that full layout was not observed through USB on either version.
+Reading the stored byte does not establish its optical effect.
 
 The Windows driver's record-write command is `0x0306`, selector 3, with inline
 payload `{recordId, length, data...}`. NV dispatcher `0x1006c90e` passes that
@@ -354,7 +367,8 @@ payload to the record writer. After explicit authorisation, the physical
 campaign attempted this command with the original record unchanged. No matching
 completion arrived; two subsequent reads verified the original full slot
 intact. The runner stopped before cap 5. No working write or restoration was
-established. No factory reset or firmware update was performed.
+established. No factory reset was performed. This record-write trial preceded
+the later firmware update.
 
 #### Factory command ingress and permissions
 
@@ -592,9 +606,12 @@ detection state. These are bounded control-flow checks, not scheduler emulation.
 
 Together with the ten earlier Bluetooth checks, the three ingress cases and
 sixteen clamp cases produce 65 passing checks under Ghidra 12.2. They analyse
-`5.23.6.0`; the controller still runs `5.9.2709.0`. The installed-version
-difference remains a reason to test its HID Control Point directly. The
-[XIAO reference](bluetooth-xiao.md) records direct writes and the additional
+`5.23.6.0`, while the controller still ran `5.9.2709.0`. That earlier version
+difference motivated the direct HID Control Point tests. The subsequent USB
+readback and fresh GATT discovery confirm application `5.23.6.0`. The
+[post-update campaign](brightness-campaign.md#post-update-results-52360)
+repeated the LED formats and HID Suspend/Resume without a light change.
+The [XIAO reference](bluetooth-xiao.md) records direct writes and the additional
 Suspend/Resume experiment.
 
 <details>

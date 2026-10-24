@@ -164,6 +164,123 @@ application image was obtained. Command `0x1601` is also absent from the newer
 firmware's level-1 whitelist. Neither timeout proves that the older installed
 firmware implements the same gate.
 
+## UFU firmware update checks
+
+The modern update path is `Windows.Gaming.Input.dll!FwUpdateProcessDevices`
+at `0x18006c890`, through `FwUpdateSendCmd` at `0x18006f9bc` and
+`xboxgip.sys!gipProcessFwUpdateIoctl` at `0x1c0031ef0`. The legacy
+`dc1-controller.sys!DccUsbFw*` vendor-control path above is a separate protocol.
+These results use the pinned `10.0.26100.1` library and GIP driver listed below.
+
+`FwUpdateSendCmd` builds a host request for IOCTL `0x40001c70`. Host command 2
+wraps a UFU command; the driver validates the device ID, request sizes and update
+state, then sends GIP command `0x0c`, flags `0x20`, for modern devices. The
+driver selects `0xa1` for legacy `045e:02d1` and `045e:02d2`. Host command numbers
+also cover polling and session control; they are not UFU command bytes.
+
+| Check              | Observed behaviour                                                                                                     | Port requirement                                                                                               |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Manifest structure | `FwManifestInit`, `0x18006f3b8`, checks magic `0x6d686472`, format 1, at most ten entries, total size and image bounds | Validate the complete package before starting an update, including checked arithmetic and every entry's bounds |
+| Device match       | `FwUpdateProcessDevices` compares manifest VID/PID with the UFU device-info reply                                      | Match the selected controller and manifest before writing                                                      |
+| Transfer size      | Device-info handling caps the advertised maximum write size at `0x1000` and rounds down to a multiple of four          | Derive block sizes from validated device capabilities                                                          |
+| Replies            | The state machine compares the reply command with the pending command and branches on status                           | Reject malformed replies; ignore unrelated replies without advancing the update                                |
+| Block contents     | The host calculates SHA-1 over package blocks and compares the device's block hashes                                   | Keep block verification separate from package provenance                                                       |
+| Completion         | Success requires the latched verified count to equal the manifest entry count                                          | Preserve per-component progress across passes and expected reconnects                                          |
+
+`FwManifestInit` prints package and component minimum versions but does not
+enforce them in that function. The inspected manifest parser and UFU state
+machine contain no package-signature verification. This finding is limited to
+those functions; package acquisition, Xbox Accessories and controller-side
+authentication remain outside this audit.
+
+### Component ordering and completion
+
+`FwUpdateManifestReorderComponents` at `0x18006f7f4` chooses `4, 7, 3, 2, 1`
+when component 3 is absent, or when component 2 is present and the new component
+3 image is smaller than its reported installed size. Otherwise it chooses
+`2, 1, 4, 7, 3`. Missing manifest entries are removed from the order. The caller
+uses device replies and manifest history to establish the installed state;
+manifest order alone does not determine the write sequence.
+
+The optional `GetVersion` partition tail is not mandatory for an update.
+`FwUpdateProcessDevices` accepts its magic or calls
+`FwUpdateManifestPopulateSizeFromManifestHistory` at `0x18006f730`. That helper
+selects history by VID/PID and installed major/minor version, then supplies a
+component size for ordering. It does not supply a partition address. Supplied
+metadata must be checked separately. An older component's historical size is
+an ordering input; it does not define the write limit for a new package.
+
+The state machine records completion in per-component flags:
+
+- A matching version sets mask `0x02` and increments the verified count, unless
+  update flags require processing the component.
+- A complete block pass with zero writes sets masks `0x01` and `0x02`; the
+  verified count increases only if `0x02` was previously clear. A pass that
+  writes blocks marks progress with `0x01` and requires a later verification.
+- `BeginUpdate` status 4, "in use", sets `0x04` and moves to the next component.
+  It does not increment the verified count.
+- Entries whose manifest flags contain `0x01` follow a separate "critical
+  component" skip policy that also increments the verified count. The analysed
+  MERL `5.23.6.0` package has zero flags on all three entries.
+
+Verified entries are skipped on later passes. Consequently, success represents
+the state machine's accumulated completion decisions. It does not require every
+component's bytes to match simultaneously at the end. The
+[MERL package](firmware.md#download-and-package-identity) places components 3 and 4 at the same
+address, `0x10027000`; their exact activation and replacement sequence still
+remains unverified; a matching Windows update trace could clarify it. Status 4 alone cannot justify dropping
+component 4 from the package or reporting success.
+
+### Operating system checks and validation limits
+
+Windows resolves a PnP interface in `do_UpdateFirmware<PnpDevice>` at
+`0x1800296c8`; the GIP driver resolves the host device ID for each update request.
+Native update tools need corresponding transport checks on each target OS:
+
+- macOS: obtain exclusive USB access, verify privileges where detachment needs
+  them, reclaim the intended controller after re-enumeration, and inhibit sleep.
+- Linux: verify device permissions or udev rules, detach and restore `xpad` when
+  it owns the interface, reclaim the controller after re-enumeration, and inhibit
+  sleep.
+
+These requirements are separate from behaviours established by the Windows
+disassembly. No Windows USB update trace was obtained. A later macOS USB update
+using xboxctl completed; its [component readback](firmware-update.md#recorded-update-result)
+confirms the target versions. Linux update behaviour was not tested.
+
+### Repeat the UFU export
+
+After importing the baseline binaries with the launcher below, export the
+existing Ghidra project read-only:
+
+```sh
+mise exec java@corretto-25 -- java -Xmx2G -Xshare:off \
+  -Djava.awt.headless=true --enable-native-access=ALL-UNNAMED \
+  -Djava.system.class.loader=ghidra.GhidraClassLoader \
+  -Dapplication.settingsdir="$PWD/target/windows-analysis/settings" \
+  -Dapplication.cachedir="$PWD/target/windows-analysis/cache" \
+  -cp "$PWD/target/ghidra-native/install/Ghidra/Framework/Utility/lib/Utility.jar" \
+  ghidra.Ghidra ghidra.app.util.headless.AnalyzeHeadless \
+  "$PWD/target/windows-analysis/projects" XboxWindows \
+  -process windows.gaming.input.dll -readOnly -noanalysis \
+  -scriptPath "$PWD/tools/ghidra" \
+  -postScript XboxWindows.java export "$PWD/target/windows-analysis/ufu-audit" \
+  'do_UpdateFirmware|FwUpdate(ProcessDevices|Manifest|SendCmd)'
+```
+
+Repeat that command with these substitutions for the other two exports:
+
+| Export | `-process`                 | Output directory suffix | Final function pattern                                                |
+| ------ | -------------------------- | ----------------------- | --------------------------------------------------------------------- |
+| Driver | `xboxgip.sys`              | `ufu-audit`             | `gip(FwUpdate\|HandleFwUpdate\|ProcessFwUpdate\|CheckFirmwareUpdate)` |
+| Parser | `windows.gaming.input.dll` | `ufu-manifest`          | `^FwManifestInit$`                                                    |
+
+The `.controls.c` files contain decompiled functions and instruction listings;
+the corresponding `.functions.tsv` files index symbols. Existing run logs are
+`target/windows-analysis/ufu-audit-wgi.log`, `ufu-audit-gip.log` and
+`ufu-manifest.log`. Downloaded Microsoft binaries, symbols and generated exports
+remain local ignored artifacts; this document records addresses and findings.
+
 ## XIAO decision
 
 None of the three new runtime leads supplies a distinct BLE packet:

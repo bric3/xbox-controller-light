@@ -7,12 +7,15 @@ macOS tools for Xbox Wireless Controller inspection and USB home-button LED cont
 | LED off, brightness, glow   | Verified on hardware        | No working command found       |
 | Identity                    | Java transport inspection   | Rust CLI and Java GATT probe   |
 | Battery                     | No implemented reading      | Coarse HID level; GATT percent |
-| Firmware version            | No implemented reading      | GATT and IORegistry            |
+| Firmware version            | xboxctl component versions  | GATT and IORegistry            |
 | Live LED state readback     | Unavailable                 | Unavailable                    |
 | Brightness after disconnect | Setting lost                | No verified setting            |
 
-Hardware results: Xbox Series X|S, firmware `5.9.2709.0`, macOS `26.7.1`.
+Recorded brightness results: Xbox Series X|S, firmware `5.9.2709.0` and `5.23.6.0`, macOS `26.7.1`.
 Only Bluetooth product ID `0b13` was tested on hardware.
+The [post-update XIAO campaign](docs/brightness-campaign.md#post-update-results-52360)
+confirmed `5.23.6.0` over Bluetooth: seven LED formats and HID Suspend/Resume
+left the light unchanged. Both USB LED paths still worked.
 
 > [!IMPORTANT]
 > USB brightness must be reapplied after reconnecting. Relative adjustments use
@@ -123,13 +126,17 @@ For direct Bluetooth experiments through a XIAO nRF52840, see the
 [XIAO setup, serial commands and guided tests](docs/bluetooth-xiao.md).
 The [brightness campaign](docs/brightness-campaign.md) runs factory-format BLE
 trials, USB runtime commands and EEPROM reads through untimed native dialogs.
+For firmware downloads and inspection, see [firmware updates](docs/firmware-update.md).
+`xboxctl` was used to read component versions and update the controller over USB.
 
-| Document                                      | Contents                                                     |
-| --------------------------------------------- | ------------------------------------------------------------ |
-| [Analysis](docs/analysis.md)                  | Results, evidence boundaries and repository layout           |
-| [USB](docs/usb.md)                            | LED utility, 13-byte macOS framing, retention and readback   |
-| [Bluetooth on macOS](docs/bluetooth-macos.md) | GATT schema, packet tests, capture results and access limits |
-| [Firmware](docs/firmware.md)                  | Pinned image, recovered dispatch tables, PWM path and checks |
+| Document                                      | Contents                                                        |
+| --------------------------------------------- | --------------------------------------------------------------- |
+| [Analysis](docs/analysis.md)                  | Results, evidence boundaries and repository layout              |
+| [USB](docs/usb.md)                            | LED utility, 13-byte macOS framing, retention and readback      |
+| [Bluetooth on macOS](docs/bluetooth-macos.md) | GATT schema, packet tests, capture results and access limits    |
+| [Firmware](docs/firmware.md)                  | Pinned image, recovered dispatch tables, PWM path and checks    |
+| [Firmware updates](docs/firmware-update.md)   | Component versions, firmware downloads and USB update commands  |
+| [Windows drivers](docs/windows-drivers.md)    | LED API, transport boundaries and UFU update checks             |
 
 ## Licence
 

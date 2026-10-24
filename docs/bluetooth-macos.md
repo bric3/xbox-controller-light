@@ -4,6 +4,11 @@
 
 Evidence: 2026-10-04 through 2026-10-15. Target: Series X|S `045e:0b13`,
 firmware `5.9.2709.0`, built-in Mac radio, SIP enabled.
+These observations precede the subsequently confirmed
+[application update to `5.23.6.0`](firmware-update.md#recorded-update-result).
+The [post-update XIAO campaign](brightness-campaign.md#post-update-results-52360)
+recorded no light change for seven BLE LED formats and HID Suspend/Resume.
+The built-in macOS Bluetooth path has not been retested on `5.23.6.0`.
 
 ## Support and results
 
@@ -23,7 +28,7 @@ firmware `5.9.2709.0`, built-in Mac radio, SIP enabled.
 > [!IMPORTANT]
 > These tests establish the limits of the tested interfaces. They do not prove
 > that every possible Bluetooth LED command is absent. The analysed firmware
-> `5.23.6.0` differs from installed `5.9.2709.0`.
+> `5.23.6.0` differed from the `5.9.2709.0` installation used for these tests.
 
 ## macOS report path
 

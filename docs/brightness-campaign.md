@@ -6,9 +6,57 @@ This campaign tests recovered runtime command formats on the physical controller
 reads its configuration and application memory, and provides a separately
 authorised EEPROM cap experiment.
 The BLE carrier is a hypothesis: the analysed `5.23.6.0` application does not
-route its vendor characteristic to the factory dispatcher. The connected
-controller previously reported `5.9.2709.0`. An ATT success establishes
+route its vendor characteristic to the factory dispatcher. The controller was
+updated from `5.9.2709.0` to `5.23.6.0`; the post-update campaign below confirms
+the new version over GATT. An ATT success establishes
 acceptance of the write, separately from command execution or visible dimming.
+
+## Post-update results: 5.23.6.0
+
+On 2026-10-24, fresh XIAO pairing established `SECURITY 1 2 16` and read
+GATT Firmware Revision `5.23.6.0`. Discovery found six primary services,
+the HID input/output reports and vendor write handle `002a`. Fresh controller
+input was verified before the LED trials. Each LED trial sent four requests,
+alternating steps 0 and 20, with observations recorded through native dialogs.
+
+| Trial                        | Transport result                                               | Visual observation |
+| ---------------------------- | -------------------------------------------------------------- | ------------------ |
+| BLE raw factory LED          | Four writes and cleanup acknowledged                           | Unchanged          |
+| BLE GIP factory LED          | Four writes and cleanup acknowledged                           | Unchanged          |
+| BLE raw factory unlock + LED | Three keys, four writes and cleanup acknowledged               | Unchanged          |
+| BLE GIP factory unlock + LED | Three keys, four writes and cleanup acknowledged               | Unchanged          |
+| Seven-byte HID GIP           | Four writes rejected with ATT `0x0180`                         | Unchanged          |
+| Thirteen-byte HID GIP        | Four writes acknowledged                                       | Unchanged          |
+| Seven-byte vendor GIP        | Four writes acknowledged                                       | Unchanged          |
+| HID Suspend/Resume           | Both Write Commands transmitted; encrypted connection retained | Unchanged          |
+| USB shared HID baseline      | Four brightness writes accepted                                | Changed            |
+| USB factory LED              | Four requests with matching successful `0x0b01` replies        | Changed            |
+
+USB factory unlock returned a matching successful `0x0211` reply. Record-0
+lookup still returned the two-byte address `60 00`. Two full-slot reads were
+identical, with record ID 0, length 26 and a valid checksum; payload byte 22
+remains 80. The saved 32-byte slot also matches the pre-update snapshot from
+`2026-10-24T15-06-39.110669Z` byte for byte (`cmp` exit status 0).
+USB cleanup restored step 20, followed by a confirmed power cycle. After HID
+Resume, input notifications increased from 43 to 206. All three runners exited
+with status 0; both BLE sessions ended with confirmed disconnection.
+
+Private evidence:
+
+- Factory BLE and USB: `target/campaigns/2026-10-24T17-25-54.193956Z/`, with serial log `target/xiao/runs/2026-10-24T17-26-02.251263Z.log`.
+- Standard BLE LED formats: `target/xiao/runs/2026-10-24T17-32-32.813034Z.log`.
+- HID Suspend/Resume: `target/xiao/runs/2026-10-24T17-35-18.234066Z.log`.
+
+Two earlier follow-up runs, `17-30-19.891531Z` and `17-31-24.314125Z`,
+stopped during discovery with XIAO `ERROR SOFTDEVICE 00000011`, before LED
+writes. Nordic defines that status as busy. Discovery/read requests rejected
+with that status now receive up to ten retries, 100 ms apart. Writes, other
+errors and timeouts stop the request. Self-tests cover the retry boundary and
+command exclusions; the subsequent full runs completed without another busy error.
+
+These trials used the analysed application release. No EEPROM write, cap
+change or application flash-read attempt was included. The built-in macOS
+Bluetooth path has not been retested on `5.23.6.0`.
 
 ## Run
 
@@ -17,6 +65,10 @@ Keep the XIAO connected. Close serial monitors before running:
 ```sh
 mise exec java@corretto-25 -- jbang tools/XboxBrightnessCampaign.java --self-test
 mise exec java@corretto-25 -- jbang tools/XboxBrightnessCampaign.java --run /dev/cu.usbmodem1101
+
+# Repeat the standard HID/vendor LED formats and HID Suspend/Resume.
+mise exec java@corretto-25 -- jbang tools/XboxBleExperiment.java --run /dev/cu.usbmodem1101
+mise exec java@corretto-25 -- jbang tools/XboxBleExperiment.java --suspend-test /dev/cu.usbmodem1101
 
 # Resume with the USB stages only; no XIAO port is required.
 mise exec java@corretto-25 -- jbang tools/XboxBrightnessCampaign.java --usb-only
@@ -191,6 +243,9 @@ record read also writes `record-0-slot.bin` there. These files use mode `0600`;
 the record can contain controller identity data. The existing XIAO serial layer
 also writes its full transcript under `target/xiao/runs/`.
 
+<details>
+<summary>Earlier physical trials on firmware 5.9.2709.0</summary>
+
 ### Recorded physical results, 2026-10-24
 
 Run `2026-10-24T14-55-17.061091Z` connected through the XIAO, established
@@ -249,6 +304,10 @@ successful EEPROM write, verified restore or resulting BLE dimming was observed.
 The earlier `2026-10-24T14-38-59.228196Z` run was cancelled at the opening
 dialog, before hardware commands. No observation is inferred from an
 unanswered dialog. ATT acknowledgements do not establish a BLE factory unlock.
+
+</details>
+
+## Verification
 
 Self-tests check exact packet bytes, brightness bounds, command exclusions,
 reply correlation and lengths, and rejection of a corrupt EEPROM checksum.

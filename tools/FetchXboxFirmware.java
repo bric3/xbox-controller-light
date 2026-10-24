@@ -99,12 +99,40 @@ class FetchXboxFirmware {
     }
 
     public static void main(String[] args) throws Exception {
+        if (args.length == 1 && (args[0].equals("--help") || args[0].equals("-h"))) {
+            System.out.printf("""
+                    Usage: FetchXboxFirmware.java [OUTPUT_DIRECTORY] | --help | --self-test
+
+                    Download and extract the pinned Microsoft MERL package 5.23.6.0
+                    for USB 045e:0b12. This tool does not access a controller or flash firmware.
+                    Default output: target/firmware/MERL-5.23.6.0
+
+                    Source: %s
+                    Expected SHA-256: %s
+
+                    Cached package.bin files are verified before extraction, so a cached run
+                    works offline. Existing files with different contents are never replaced.
+                    The tool checks the pinned hash and package layout; it does not verify
+                    the embedded Microsoft signatures or select the latest release.
+
+                    If automatic downloading fails, obtain the complete package manually:
+                      mkdir -p target/firmware/MERL-5.23.6.0
+                      curl --fail --location '%s' --output target/firmware/MERL-5.23.6.0/package.bin
+                      mise exec java@corretto-25 -- jbang tools/FetchXboxFirmware.java
+
+                    Official feed indexes (for checking release metadata):
+                      https://aka.ms/xboxaccessoriesfwcdnpcga
+                      https://aka.ms/xboxaccessoriesfwcdnxbga
+                    Keep the URL, expected hash and package version pinned together.
+                    """, URL, HASH, URL);
+            return;
+        }
         if (args.length == 1 && args[0].equals("--self-test")) {
             selfTest();
             return;
         }
         if (args.length > 1 || (args.length == 1 && args[0].startsWith("--")))
-            throw new IllegalArgumentException("Usage: FetchXboxFirmware.java [OUTPUT_DIRECTORY] | --self-test");
+            throw new IllegalArgumentException("Usage: FetchXboxFirmware.java [OUTPUT_DIRECTORY] | --help | --self-test");
 
         Path directory = Path.of(args.length == 0 ? "target/firmware/MERL-5.23.6.0" : args[0]);
         Path packageFile = directory.resolve("package.bin");
