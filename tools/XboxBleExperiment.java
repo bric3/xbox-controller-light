@@ -109,7 +109,21 @@ class XboxBleExperiment {
         }
 
         List<String> request(String command, String prefix) throws Throwable {
-            send(command); return await(prefix, 20);
+            for (int attempt = 0; ; attempt++) {
+                send(command);
+                try { return await(prefix, 20); }
+                catch (IOException failure) {
+                    if (!retryBusy(command, failure.getMessage(), attempt)) throw failure;
+                    record("RETRY GATT_BUSY " + command + " attempt=" + (attempt + 1));
+                    NativeMacDialog.pause(100);
+                }
+            }
+        }
+
+        static boolean retryBusy(String command, String response, int attempt) {
+            // SoftDevice rejects busy discovery/read requests before queuing them; writes are never retried.
+            return attempt < 10 && "ERROR SOFTDEVICE 00000011".equals(response)
+                    && Set.of("SERVICES", "CHARS", "DESCS", "READ").contains(command.split(" ", 2)[0]);
         }
 
         String last(String command, String prefix) throws Throwable {
@@ -410,6 +424,16 @@ class XboxBleExperiment {
     }
 
     static void selfTest() throws Exception {
+        for (String command : List.of("SERVICES 0001", "CHARS 0001 0007", "DESCS 001f 0020", "READ 000f 0000")) {
+            if (!Serial.retryBusy(command, "ERROR SOFTDEVICE 00000011", 0)
+                    || Serial.retryBusy(command, "ERROR SOFTDEVICE 00000011", 10)
+                    || Serial.retryBusy(command, "ERROR SOFTDEVICE 00000008", 0)
+                    || Serial.retryBusy(command, "Timed out waiting for READ", 0))
+                throw new AssertionError("Incorrect bounded read-only busy retry");
+        }
+        for (String command : List.of("WRITE 002a 00", "WRITE_CMD 001a 00", "PAIR", "CONNECT 000000000000 0", "DISCONNECT"))
+            if (Serial.retryBusy(command, "ERROR SOFTDEVICE 00000011", 0))
+                throw new AssertionError("Retried a command outside discovery/reads");
         if (!HEX.formatHex(led(1, 0, false)).equals("0a200103000100")
                 || !HEX.formatHex(led(255, 20, true)).equals("0a20ff03000114000000000000")
                 || status("WRITE 010d 0022") != 0x010d || STOP_RUMBLE.length != 8)
